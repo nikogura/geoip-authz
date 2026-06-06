@@ -19,10 +19,17 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/nikogura/geoip-authz/pkg/config"
 	"github.com/nikogura/geoip-authz/pkg/geoip"
+	"github.com/nikogura/geoip-authz/pkg/metrics"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
+
+// tracerName is the instrumentation scope for spans emitted by this service.
+const tracerName = "github.com/nikogura/geoip-authz"
 
 // Response headers set on every ext_authz check so the verdict is observable in
 // the proxy's access logs (and so backends could consume the geo data later).
@@ -45,12 +52,13 @@ type Handler struct {
 	ready          func() (ready bool)
 	mode           config.Mode
 	clientIPHeader string
+	metrics        *metrics.Metrics
 	log            *slog.Logger
 }
 
 // NewHandler builds a Handler. ready reports whether the geo database is loaded
-// (used by the readiness probe).
-func NewHandler(blocklist *geoip.Blocklist, resolver geoip.Resolver, ready func() (ready bool), mode config.Mode, clientIPHeader string, log *slog.Logger) (h *Handler) {
+// (used by the readiness probe); metrics may be nil (instrumentation no-ops).
+func NewHandler(blocklist *geoip.Blocklist, resolver geoip.Resolver, ready func() (ready bool), mode config.Mode, clientIPHeader string, m *metrics.Metrics, log *slog.Logger) (h *Handler) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -61,6 +69,7 @@ func NewHandler(blocklist *geoip.Blocklist, resolver geoip.Resolver, ready func(
 		ready:          ready,
 		mode:           mode,
 		clientIPHeader: clientIPHeader,
+		metrics:        m,
 		log:            log,
 	}
 
@@ -101,22 +110,43 @@ func (h *Handler) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 // returns 403 (enforce + blocked) or 200 otherwise. In detect mode it always
 // returns 200 but still annotates and logs the would-block verdict.
 func (h *Handler) handleCheck(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	ctx, span := otel.Tracer(tracerName).Start(r.Context(), "geoip.authz.check")
+	defer span.End()
+
+	h.metrics.InflightAdd(ctx, 1)
+	defer h.metrics.InflightAdd(ctx, -1)
+
 	clientIP := clientIPFromHeader(r.Header.Get(h.clientIPHeader))
 	verdict := h.blocklist.Evaluate(h.resolver, clientIP)
+
+	deny := verdict.Blocked && h.mode == config.ModeEnforce
+
+	verdictStr := "allow"
+	if verdict.Blocked {
+		verdictStr = "block"
+	}
 
 	w.Header().Set(HeaderCountry, verdict.CountryISO)
 	w.Header().Set(HeaderRegion, verdict.RegionISO)
 	w.Header().Set(HeaderReason, verdict.Reason)
+	w.Header().Set(HeaderVerdict, verdictStr)
 
-	deny := verdict.Blocked && h.mode == config.ModeEnforce
+	span.SetAttributes(
+		attribute.String("geoip.country", verdict.CountryISO),
+		attribute.String("geoip.region", verdict.RegionISO),
+		attribute.String("geoip.verdict", verdictStr),
+		attribute.String("geoip.reason", verdict.Reason),
+		attribute.Bool("geoip.denied", deny),
+	)
 
-	if verdict.Blocked {
-		w.Header().Set(HeaderVerdict, "block")
-	} else {
-		w.Header().Set(HeaderVerdict, "allow")
+	traceID := ""
+	if sc := span.SpanContext(); sc.HasTraceID() {
+		traceID = sc.TraceID().String()
 	}
 
-	h.log.InfoContext(r.Context(), "geoip check",
+	h.log.InfoContext(ctx, "geoip check",
 		"client_ip", clientIP.String(),
 		"country", verdict.CountryISO,
 		"region", verdict.RegionISO,
@@ -124,7 +154,10 @@ func (h *Handler) handleCheck(w http.ResponseWriter, r *http.Request) {
 		"blocked", verdict.Blocked,
 		"mode", string(h.mode),
 		"denied", deny,
+		"trace_id", traceID,
 	)
+
+	h.metrics.ObserveCheck(ctx, verdictStr, verdict.Reason, deny, time.Since(start).Seconds())
 
 	if deny {
 		http.Error(w, "forbidden: geographic restriction", http.StatusForbidden)

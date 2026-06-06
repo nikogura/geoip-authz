@@ -6,8 +6,8 @@ on:
   pull_request: {}
 
 permissions:
-  contents: write
-  packages: write
+  contents: write   # create tags + releases
+  packages: write   # push image to ghcr
 
 jobs:
   test:
@@ -20,14 +20,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate Version
+      - name: Semver
         id: semver
-        run: |
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          VERSION=${LAST_TAG#v}
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-          PATCH=$((PATCH + 1))
-          echo "version_tag=v${MAJOR}.${MINOR}.${PATCH}" >> "$GITHUB_OUTPUT"
+        uses: paulhatch/semantic-version@v5.1.0
+        with:
+          bump_each_commit: true
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -40,14 +37,25 @@ jobs:
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
+      # kustomize + helm so `make test` can render the distro (test-distro).
+      - name: Install kustomize
+        run: |
+          curl -sLo kustomize.tar.gz \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
+          tar -xzf kustomize.tar.gz
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
       - name: Lint
         run: make lint
 
-      - name: Test
+      - name: Test (code + distro)
         run: make test
 
   publish:
-    name: Publish (multi-arch)
+    name: Publish + Release
     runs-on: ubuntu-latest
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -81,7 +89,22 @@ jobs:
             ghcr.io/nikogura/geoip-authz:${{ needs.test.outputs.version_tag }}
             ghcr.io/nikogura/geoip-authz:latest
 
-      - name: Tag release
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      # Publish the chart as an OCI artifact to ghcr alongside the image.
+      - name: Package and push Helm chart
         run: |
-          git tag ${{ needs.test.outputs.version_tag }}
-          git push origin ${{ needs.test.outputs.version_tag }}
+          VERSION="${{ needs.test.outputs.version_tag }}"
+          VERSION="${VERSION#v}"
+          helm registry login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          helm package charts/geoip-authz --version "$VERSION" --app-version "$VERSION"
+          helm push "geoip-authz-${VERSION}.tgz" oci://ghcr.io/nikogura/charts
+
+      # Auto-release: creates the git tag and a GitHub Release for this version.
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.test.outputs.version_tag }}
+          name: ${{ needs.test.outputs.version_tag }}
+          generate_release_notes: true

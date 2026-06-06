@@ -56,7 +56,8 @@ func (s byIP) Resolve(ip net.IP) (res geoip.GeoResult, err error) {
 
 func handler(mode config.Mode, r geoip.Resolver, ready func() (ok bool)) (h http.Handler) {
 	bl := geoip.NewBlocklist([]string{"RU", "IR"}, []string{"UA-43"}, true)
-	h = authz.NewHandler(bl, r, ready, mode, "X-Forwarded-For", nil).Routes()
+	// nil metrics — instrumentation is no-op'd in unit tests.
+	h = authz.NewHandler(bl, r, ready, mode, "X-Forwarded-For", nil, nil).Routes()
 
 	return h
 }

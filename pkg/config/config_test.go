@@ -56,6 +56,18 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 	require.False(t, cfg.FailClosed)
 }
 
+func TestLoad_BlocklistNewlineAndMixed(t *testing.T) {
+	// YAML `|` block-scalar form: newline-separated, indented.
+	t.Setenv("GEOIP_BLOCKED_COUNTRIES", "IR\n  KP\nRU\n")
+	// Mixed comma + newline must also work.
+	t.Setenv("GEOIP_BLOCKED_REGIONS", "UA-09,\nUA-14\nUA-43")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Equal(t, []string{"IR", "KP", "RU"}, cfg.BlockedCountries)
+	require.Equal(t, []string{"UA-09", "UA-14", "UA-43"}, cfg.BlockedRegions)
+}
+
 func TestLoad_InvalidModeRejected(t *testing.T) {
 	t.Setenv("GEOIP_MODE", "audit")
 

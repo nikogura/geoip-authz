@@ -1,0 +1,23 @@
+geoip-authz is installed as {{ include "geoip-authz.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+Mode: {{ .Values.mode }}{{ if eq .Values.mode "detect" }} (logging only — no requests are blocked){{ end }}
+
+Wire it as an ext_authz backend (Envoy Gateway example):
+
+  extAuth:
+    failOpen: false
+    headersToExtAuth: ["x-forwarded-for"]
+    http:
+      backendRefs:
+        - name: {{ include "geoip-authz.fullname" . }}
+          namespace: {{ .Release.Namespace }}
+          port: {{ .Values.service.port }}
+
+Metrics: GET /metrics on the service. Health: /healthz, /readyz.
+{{- if not (include "geoip-authz.useSecret" .) }}
+
+NOTE: no MaxMind credentials configured. Set maxmind.accountId/licenseKey (or
+maxmind.existingSecret), or GEOIP_DB_PATH, or point downloadURL at an
+unauthenticated mirror — otherwise the database download will fail and the
+service will stay not-ready (failing closed).
+{{- end }}

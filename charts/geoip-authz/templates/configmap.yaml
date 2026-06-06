@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "geoip-authz.fullname" . }}
+  labels:
+    {{- include "geoip-authz.labels" . | nindent 4 }}
+data:
+  GEOIP_MODE: {{ .Values.mode | quote }}
+  GEOIP_FAIL_CLOSED: {{ .Values.failClosed | quote }}
+  {{- with .Values.downloadURL }}
+  GEOIP_DOWNLOAD_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.clientIPHeader }}
+  GEOIP_CLIENT_IP_HEADER: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.refreshEvery }}
+  GEOIP_REFRESH_EVERY: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.blockedCountries }}
+  GEOIP_BLOCKED_COUNTRIES: |
+    {{- range .Values.blockedCountries }}
+    {{ . }}
+    {{- end }}
+  {{- end }}
+  {{- if .Values.blockedRegions }}
+  GEOIP_BLOCKED_REGIONS: |
+    {{- range .Values.blockedRegions }}
+    {{ . }}
+    {{- end }}
+  {{- end }}

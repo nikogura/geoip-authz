@@ -113,3 +113,24 @@ func TestStore_FetchForwardsBasicAuthAndExtracts(t *testing.T) {
 	require.Equal(t, "123456", gotUser)
 	require.Equal(t, "license-abc", gotPass)
 }
+
+// MaxMind credentials are optional: with both empty, no Authorization header is
+// sent (supports unauthenticated mirrors, credential-injecting proxies, or
+// GEOIP_DB_PATH-only deployments).
+func TestStore_FetchOmitsAuthWhenCredsEmpty(t *testing.T) {
+	t.Parallel()
+
+	var sawAuth bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _, sawAuth = r.BasicAuth()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(makeTarGz(t, map[string][]byte{"GeoLite2-City_x/GeoLite2-City.mmdb": []byte("bogus")}))
+	}))
+	defer srv.Close()
+
+	store := geoip.NewStore(srv.Client())
+	_ = store.Fetch(context.Background(), srv.URL, "", "")
+
+	require.False(t, sawAuth, "no basic-auth header should be sent when creds are empty")
+}

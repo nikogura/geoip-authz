@@ -25,6 +25,7 @@ import (
 
 	"github.com/nikogura/geoip-authz/pkg/config"
 	"github.com/nikogura/geoip-authz/pkg/geoip"
+	"github.com/nikogura/geoip-authz/pkg/metrics"
 )
 
 const (
@@ -40,6 +41,7 @@ type Service struct {
 	cfg       config.Config
 	store     *geoip.Store
 	blocklist *geoip.Blocklist
+	metrics   *metrics.Metrics
 	log       *slog.Logger
 }
 
@@ -73,13 +75,30 @@ func (s *Service) Run(ctx context.Context) (err error) {
 		"fail_closed", s.cfg.FailClosed,
 	)
 
+	var metricsHandler http.Handler
+
+	s.metrics, metricsHandler, err = metrics.New()
+	if err != nil {
+		err = fmt.Errorf("setting up metrics: %w", err)
+
+		return err
+	}
+
+	err = s.metrics.RegisterDBLoaded(s.store.Ready)
+	if err != nil {
+		return err
+	}
+
 	s.primeDatabase(ctx)
 
 	go s.refreshLoop(ctx)
 
-	handler := NewHandler(s.blocklist, s.store, s.store.Ready, s.cfg.Mode, s.cfg.ClientIPHeader, s.log)
+	handler := NewHandler(s.blocklist, s.store, s.store.Ready, s.cfg.Mode, s.cfg.ClientIPHeader, s.metrics, s.log)
 
-	err = s.serve(ctx, handler.Routes())
+	mux := handler.Routes()
+	mux.Handle("/metrics", metricsHandler)
+
+	err = s.serve(ctx, mux)
 
 	return err
 }
@@ -89,6 +108,8 @@ func (s *Service) Run(ctx context.Context) (err error) {
 // no traffic and the edge fails closed) until a database is in place.
 func (s *Service) primeDatabase(ctx context.Context) {
 	err := s.loadOnce(ctx)
+	s.metrics.ObserveRefresh(ctx, err == nil)
+
 	if err != nil {
 		s.log.ErrorContext(ctx, "initial database load failed; will retry", "error", err.Error())
 
@@ -129,6 +150,8 @@ func (s *Service) refreshLoop(ctx context.Context) {
 			return
 		case <-timer.C:
 			err := s.store.Fetch(ctx, s.cfg.DownloadURL, s.cfg.AccountID, s.cfg.LicenseKey)
+			s.metrics.ObserveRefresh(ctx, err == nil)
+
 			if err != nil {
 				s.log.ErrorContext(ctx, "database refresh failed; retaining last-good", "error", err.Error())
 				timer.Reset(refreshRetryDelay)

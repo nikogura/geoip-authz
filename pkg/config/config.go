@@ -138,8 +138,15 @@ func getEnv(key, def string) (val string) {
 	return val
 }
 
-// getEnvList reads GEOIP_<key> as a comma-separated list, trimming whitespace
-// and dropping empty entries. Returns an empty slice when unset.
+// getEnvList reads GEOIP_<key> as a list separated by commas and/or newlines,
+// so both inline (`IR,KP,RU`) and YAML block-scalar (`|`) forms work:
+//
+//	GEOIP_BLOCKED_COUNTRIES: |
+//	  IR
+//	  KP
+//	  RU
+//
+// Entries are trimmed; empties are dropped. Returns an empty slice when unset.
 func getEnvList(key string) (out []string) {
 	raw := os.Getenv(envPrefix + key)
 	out = []string{}
@@ -148,7 +155,13 @@ func getEnvList(key string) (out []string) {
 		return out
 	}
 
-	for _, item := range strings.Split(raw, ",") {
+	fields := strings.FieldsFunc(raw, func(r rune) (sep bool) {
+		sep = r == ',' || r == '\n' || r == '\r'
+
+		return sep
+	})
+
+	for _, item := range fields {
 		trimmed := strings.TrimSpace(item)
 		if trimmed != "" {
 			out = append(out, trimmed)

@@ -1,0 +1,12 @@
+apiVersion: v2
+name: geoip-authz
+description: ext_authz GeoIP allow/deny service for reverse proxies (Envoy and friends)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/nikogura/geoip-authz
+sources:
+  - https://github.com/nikogura/geoip-authz
+maintainers:
+  - name: Nik Ogura
+    email: nik.ogura@gmail.com

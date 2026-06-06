@@ -1,6 +1,6 @@
 # geoip-authz
 
-A small, production-grade **external authorization (`ext_authz`) service** that
+A small **external authorization (`ext_authz`) service** that
 allows or denies HTTP requests by the client's **GeoIP location**. Point Envoy
 (or any reverse proxy that speaks the HTTP ext_authz contract) at it to enforce
 country/region access policy at the edge.
@@ -34,9 +34,24 @@ You supply the country/region list via configuration.
 | `/`       | ext_authz check (catch-all). `2xx` = allow, `403` = deny   |
 | `/healthz`| liveness                                                   |
 | `/readyz` | readiness — `200` only once the database is loaded         |
+| `/metrics`| Prometheus metrics (golden signals — see Observability)    |
 
 Every check sets `X-Geoip-Verdict` (`allow`/`block`), `X-Geoip-Country`,
 `X-Geoip-Region`, and `X-Geoip-Reason` on the response for access-log capture.
+
+## Observability
+
+- **Metrics** — OpenTelemetry instruments exported in Prometheus format at
+  `/metrics`. The golden signals plus DB health:
+  - `geoip_authz_checks_total{verdict,reason,denied}` — traffic + errors
+  - `geoip_authz_check_duration_seconds` — latency histogram
+  - `geoip_authz_inflight_requests` — saturation
+  - `geoip_authz_db_refresh_total{success}` and `geoip_authz_db_loaded` — DB health
+- **Tracing** — OpenTelemetry spans (`geoip.authz.check`). Disabled (no-op) unless
+  an OTLP endpoint is set via the standard `OTEL_EXPORTER_OTLP_ENDPOINT` (or
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`); then spans export over OTLP/HTTP.
+- **Logs** — structured JSON (`slog`), one line per check, including the
+  `trace_id` for correlation when tracing is enabled.
 
 ## Configuration (environment, `GEOIP_` prefix)
 
@@ -53,6 +68,19 @@ Every check sets `X-Geoip-Verdict` (`allow`/`block`), `X-Geoip-Country`,
 | `GEOIP_REFRESH_EVERY`     | `24h`                                | jittered; retains last-good on failure           |
 | `GEOIP_CLIENT_IP_HEADER`  | `X-Forwarded-For`                    | left-most entry is used                          |
 | `GEOIP_DB_PATH`           | —                                    | load a local `.mmdb` instead of downloading      |
+
+The list variables (`GEOIP_BLOCKED_COUNTRIES`, `GEOIP_BLOCKED_REGIONS`) accept
+**commas and/or newlines**, so a YAML block scalar stays readable:
+
+```yaml
+GEOIP_BLOCKED_COUNTRIES: |
+  IR
+  KP
+  RU
+```
+
+MaxMind credentials are **optional** — omit them when using `GEOIP_DB_PATH`, an
+unauthenticated mirror, or a proxy that injects its own auth.
 
 ## Running
 
@@ -96,6 +124,19 @@ spec:
       backendRefs:
         - { name: geoip-authz, namespace: geoip-authz, port: 8080 }
 ```
+
+## Deploying to Kubernetes
+
+Two equivalent options ship in this repo:
+
+- **Kustomize** — `kubernetes/` is a runnable example (namespace, ConfigMap with a
+  `|`-block blocklist, Secret stub, Deployment, Service, ServiceMonitor):
+  `kubectl apply -k kubernetes/`.
+- **Helm** — `charts/geoip-authz/`: `helm install geoip-authz ./charts/geoip-authz`.
+  The chart is also published as an OCI artifact:
+  `helm install geoip-authz oci://ghcr.io/nikogura/charts/geoip-authz`.
+
+Images are published multi-arch (amd64/arm64) to `ghcr.io/nikogura/geoip-authz`.
 
 ## Development
 

@@ -26,6 +26,7 @@ import (
 
 	"github.com/nikogura/geoip-authz/pkg/authz"
 	"github.com/nikogura/geoip-authz/pkg/config"
+	"github.com/nikogura/geoip-authz/pkg/tracing"
 )
 
 // serverCmd runs the ext_authz HTTP service.
@@ -48,6 +49,17 @@ func runServer(parent context.Context) (err error) {
 	defer stop()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	// Distributed tracing — no-op unless an OTLP endpoint is configured.
+	var shutdown func(ctx context.Context) (sErr error)
+
+	shutdown, err = tracing.Init(ctx, "geoip-authz", Version)
+	if err != nil {
+		err = fmt.Errorf("initialising tracing: %w", err)
+
+		return err
+	}
+	defer func() { _ = shutdown(context.Background()) }()
 
 	var cfg config.Config
 

@@ -1,0 +1,51 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/nikogura/geoip-authz
+  # tag defaults to the chart appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# detect = log the would-block verdict without 403ing; enforce = block (403).
+mode: detect
+failClosed: true
+
+# Empty downloadURL uses the service default (GeoLite2-City direct from MaxMind).
+# Point at a caching mirror to spare MaxMind's rate limits in a fleet.
+downloadURL: ""
+# Empty values use service defaults (X-Forwarded-For, 24h).
+clientIPHeader: ""
+refreshEvery: ""
+
+# Blocklist policy. Rendered into the ConfigMap as newline-separated blocks.
+blockedCountries: []
+# - RU
+# - IR
+blockedRegions: []
+# - UA-43
+
+# MaxMind credentials (optional — omit for a local DB path or unauthenticated
+# mirror). Set inline (a Secret is created) OR point at an existingSecret that
+# carries GEOIP_ACCOUNT_ID / GEOIP_LICENSE_KEY.
+maxmind:
+  accountId: ""
+  licenseKey: ""
+  existingSecret: ""
+
+# OTLP endpoint for distributed tracing. Empty = tracing disabled (no-op).
+otlpEndpoint: ""
+
+service:
+  port: 8080
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+serviceMonitor:
+  enabled: false
+  interval: 30s

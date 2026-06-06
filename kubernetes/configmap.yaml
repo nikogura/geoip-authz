@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: geoip-authz
+data:
+  # detect = log the would-block verdict without 403ing; flip to enforce to block.
+  GEOIP_MODE: "detect"
+  GEOIP_FAIL_CLOSED: "true"
+  # Default downloads GeoLite2-City directly from MaxMind. Point at a caching
+  # mirror (e.g. geoip-cache-proxy) to spare MaxMind's rate limits in a fleet.
+  # GEOIP_DOWNLOAD_URL: "https://geoip.example.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz"
+  #
+  # List vars accept commas and/or newlines — a YAML block scalar is readable:
+  GEOIP_BLOCKED_COUNTRIES: |
+    RU
+    IR
+    KP
+  GEOIP_BLOCKED_REGIONS: |
+    UA-09
+    UA-14
+    UA-43

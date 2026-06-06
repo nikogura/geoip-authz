@@ -1,0 +1,16 @@
+# Requires the Prometheus Operator CRDs. Scrapes the golden-signal metrics from
+# /metrics. Drop this file if you scrape via annotations or a different stack.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: geoip-authz
+  labels:
+    app: geoip-authz
+spec:
+  selector:
+    matchLabels:
+      app: geoip-authz
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
