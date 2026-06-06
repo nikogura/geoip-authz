@@ -1,6 +1,6 @@
 module github.com/nikogura/geoip-authz
 
-go 1.23
+go 1.24
 
 require (
 	github.com/oschwald/geoip2-golang v1.11.0
