@@ -32,6 +32,22 @@ import (
 
 const meterName = "github.com/nikogura/geoip-authz"
 
+// durationName is the latency instrument name; the explicit-bucket View keys off it.
+const durationName = "geoip.authz.check.duration"
+
+// durationBucketsSeconds are explicit histogram boundaries (in SECONDS) sized for
+// this operation. A geo lookup is tens of microseconds, so the OTel default
+// boundaries ([5, 10, 25, … 10000]) — which are calibrated for milliseconds — put
+// every observation in the first bucket and make histogram_quantile interpolate a
+// bogus multi-second p95 (0.95 × 5s = 4.75s). These boundaries resolve from ~25µs
+// up to 5s so the quantiles reflect reality.
+//
+//nolint:gochecknoglobals // shared bucket boundaries for the duration View
+var durationBucketsSeconds = []float64{
+	0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005,
+	0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
+}
+
 // Metrics holds the OpenTelemetry instruments for the golden signals. A nil
 // *Metrics is safe to use — every method is a no-op — so callers needn't guard.
 type Metrics struct {
@@ -58,7 +74,20 @@ func New() (m *Metrics, handler http.Handler, err error) {
 		return m, handler, err
 	}
 
-	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter))
+	// Override the default histogram boundaries for the latency instrument; the
+	// defaults are millisecond-scaled and wreck quantiles on a seconds-valued,
+	// microsecond-fast metric (see durationBucketsSeconds).
+	durationView := sdkmetric.NewView(
+		sdkmetric.Instrument{Name: durationName},
+		sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
+			Boundaries: durationBucketsSeconds,
+		}},
+	)
+
+	provider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(exporter),
+		sdkmetric.WithView(durationView),
+	)
 	meter := provider.Meter(meterName)
 
 	m = &Metrics{meter: meter}
@@ -74,7 +103,7 @@ func New() (m *Metrics, handler http.Handler, err error) {
 	}
 
 	m.duration, err = meter.Float64Histogram(
-		"geoip.authz.check.duration",
+		durationName,
 		metric.WithUnit("s"),
 		metric.WithDescription("ext_authz check latency in seconds."),
 	)

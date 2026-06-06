@@ -63,6 +63,31 @@ func TestMetrics_ExposesGoldenSignals(t *testing.T) {
 	require.Contains(t, body, `reason="blocked-country"`)
 }
 
+// TestMetrics_DurationBucketsAreSecondScaled guards against the millisecond-scaled
+// OTel default boundaries returning. With the defaults ([5, 10, … 10000]), a
+// microsecond-fast check lands in the first bucket and histogram_quantile reports a
+// bogus ~4.75s p95. The explicit-bucket View must expose sub-millisecond boundaries
+// and must NOT carry the tell-tale default 10000s boundary.
+func TestMetrics_DurationBucketsAreSecondScaled(t *testing.T) {
+	t.Parallel()
+
+	m, handler, err := metrics.New()
+	require.NoError(t, err)
+
+	// A realistic geo-lookup latency: 54µs.
+	m.ObserveCheck(context.Background(), "allow", "allowed", false, 0.000054)
+
+	body := scrape(t, handler)
+
+	// Fine, second-scaled boundaries are present (resolution where the data lives).
+	require.Contains(t, body, `geoip_authz_check_duration_seconds_bucket{`)
+	require.Contains(t, body, `le="0.0001"`)
+	require.Contains(t, body, `le="0.001"`)
+	// The millisecond-scaled OTel defaults must be gone.
+	require.NotContains(t, body, `le="10000"`)
+	require.NotContains(t, body, `le="7500"`)
+}
+
 func TestMetrics_NilSafe(t *testing.T) {
 	t.Parallel()
 
