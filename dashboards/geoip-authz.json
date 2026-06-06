@@ -1,0 +1,98 @@
+{
+  "title": "geoip-authz",
+  "uid": "geoip-authz",
+  "tags": ["geoip-authz", "ext-authz", "security"],
+  "schemaVersion": 39,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      { "name": "prometheus", "type": "datasource", "query": "prometheus", "label": "Prometheus", "current": {}, "hide": 0 },
+      { "name": "loki", "type": "datasource", "query": "loki", "label": "Loki", "current": {}, "hide": 0 },
+      { "name": "tempo", "type": "datasource", "query": "tempo", "label": "Tempo", "current": {}, "hide": 0 }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "title": "Database loaded", "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": {
+        "mappings": [ { "type": "value", "options": { "0": { "text": "NOT LOADED", "color": "red" }, "1": { "text": "Loaded", "color": "green" } } } ],
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] }
+      } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "min(geoip_authz_db_loaded)" } ]
+    },
+    {
+      "id": 2, "title": "Check rate", "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum(rate(geoip_authz_checks_total[5m]))" } ]
+    },
+    {
+      "id": 3, "title": "p95 latency", "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(geoip_authz_check_duration_seconds_bucket[5m])))" } ]
+    },
+    {
+      "id": 4, "title": "In-flight (saturation)", "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum(geoip_authz_inflight_requests)" } ]
+    },
+    {
+      "id": 5, "title": "Request rate by verdict (traffic + blocks)", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (verdict) (rate(geoip_authz_checks_total[5m]))", "legendFormat": "{{verdict}}" } ]
+    },
+    {
+      "id": 6, "title": "Check latency (p50 / p95 / p99)", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(geoip_authz_check_duration_seconds_bucket[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(geoip_authz_check_duration_seconds_bucket[5m])))", "legendFormat": "p95" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "histogram_quantile(0.99, sum by (le) (rate(geoip_authz_check_duration_seconds_bucket[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 7, "title": "Verdicts by reason", "type": "piechart",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 12 },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (reason) (rate(geoip_authz_checks_total[1h]))", "legendFormat": "{{reason}}" } ]
+    },
+    {
+      "id": 8, "title": "Would-block / block rate", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (reason) (rate(geoip_authz_checks_total{verdict=\"block\"}[5m]))", "legendFormat": "{{reason}}" } ]
+    },
+    {
+      "id": 9, "title": "DB refresh rate by outcome", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 12 },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (success) (rate(geoip_authz_db_refresh_total[1h]))", "legendFormat": "success={{success}}" } ]
+    },
+    {
+      "id": 10, "title": "Recent logs", "type": "logs",
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "options": { "showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "sortOrder": "Descending" },
+      "targets": [ { "refId": "A", "datasource": { "type": "loki", "uid": "${loki}" }, "expr": "{namespace=\"geoip-authz\"} | json", "queryType": "range" } ]
+    },
+    {
+      "id": 11, "title": "Recent traces (requires OTEL_EXPORTER_OTLP_ENDPOINT)", "type": "table",
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
+      "targets": [ { "refId": "A", "datasource": { "type": "tempo", "uid": "${tempo}" }, "queryType": "traceqlSearch", "query": "{ resource.service.name = \"geoip-authz\" }", "limit": 20, "tableType": "traces" } ]
+    }
+  ]
+}
