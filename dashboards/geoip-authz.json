@@ -1,5 +1,5 @@
 {
-  "title": "geoip-authz",
+  "title": "GeoIP-Authz",
   "uid": "geoip-authz",
   "tags": ["geoip-authz", "ext-authz", "security"],
   "schemaVersion": 39,
@@ -15,44 +15,61 @@
   },
   "panels": [
     {
-      "id": 1, "title": "Database loaded", "type": "stat",
+      "id": 1, "title": "Database Loaded", "type": "stat",
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "fieldConfig": { "defaults": {
+        "color": { "mode": "thresholds" },
         "mappings": [ { "type": "value", "options": { "0": { "text": "NOT LOADED", "color": "red" }, "1": { "text": "Loaded", "color": "green" } } } ],
         "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] }
       } },
       "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "min(geoip_authz_db_loaded)" } ]
     },
     {
-      "id": 2, "title": "Check rate", "type": "stat",
+      "id": 2, "title": "Check Rate", "type": "stat",
+      "description": "Informational traffic signal — req/s of ext_authz checks. Only red if traffic stops entirely (possible broken edge path).",
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "fieldConfig": { "defaults": {
+        "unit": "reqps",
+        "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 0.0001, "color": "green" } ] }
+      } },
       "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum(rate(geoip_authz_checks_total[5m]))" } ]
     },
     {
-      "id": 3, "title": "p95 latency", "type": "stat",
+      "id": 3, "title": "P95 Latency", "type": "stat",
+      "description": "In-handler check latency. SLO budget for this synchronous ext_authz hop: green < 1ms, red > 5ms. Not resource-relative — an in-memory lookup is ~fixed cost; only throttling inflates it.",
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "fieldConfig": { "defaults": { "unit": "s" } },
+      "fieldConfig": { "defaults": {
+        "unit": "s",
+        "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" }, { "value": 0.001, "color": "yellow" }, { "value": 0.005, "color": "red" } ] }
+      } },
       "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(geoip_authz_check_duration_seconds_bucket[5m])))" } ]
     },
     {
-      "id": 4, "title": "In-flight (saturation)", "type": "stat",
+      "id": 4, "title": "CPU (% of Limit)", "type": "stat",
+      "description": "Headline saturation — busiest pod's CPU as a fraction of its limit. Resource-relative: the denominator is the configured limit, so the 70/90% thresholds hold no matter how the limit is resized.",
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum(geoip_authz_inflight_requests)" } ]
+      "fieldConfig": { "defaults": {
+        "unit": "percentunit", "min": 0,
+        "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" }, { "value": 0.7, "color": "yellow" }, { "value": 0.9, "color": "red" } ] }
+      } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "max(sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"geoip-authz\",container=\"geoip-authz\"}[5m])) / on (pod) group_left() sum by (pod) (kube_pod_container_resource_limits{namespace=\"geoip-authz\",container=\"geoip-authz\",resource=\"cpu\"}))" } ]
     },
     {
-      "id": 5, "title": "Request rate by verdict (traffic + blocks)", "type": "timeseries",
+      "id": 5, "title": "Request Rate by Verdict (Traffic + Blocks)", "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
       "fieldConfig": { "defaults": { "unit": "reqps" } },
       "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (verdict) (rate(geoip_authz_checks_total[5m]))", "legendFormat": "{{verdict}}" } ]
     },
     {
-      "id": 6, "title": "Check latency (p50 / p95 / p99)", "type": "timeseries",
+      "id": 6, "title": "Check Latency (p50 / p95 / p99)", "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
       "fieldConfig": { "defaults": { "unit": "s" } },
@@ -63,35 +80,108 @@
       ]
     },
     {
-      "id": 7, "title": "Verdicts by reason", "type": "piechart",
+      "id": 7, "title": "CPU Utilization (% of Limit)", "type": "timeseries",
+      "description": "Per-pod CPU ÷ CPU limit. Tells you if you're near throttling (under-provisioned). Thresholds are relative to the limit, so they survive any resize.",
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 12 },
+      "fieldConfig": { "defaults": {
+        "unit": "percentunit", "min": 0,
+        "color": { "mode": "thresholds" },
+        "custom": { "thresholdsStyle": { "mode": "line" } },
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" }, { "value": 0.7, "color": "yellow" }, { "value": 0.9, "color": "red" } ] }
+      } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"geoip-authz\",container=\"geoip-authz\"}[5m])) / on (pod) group_left() sum by (pod) (kube_pod_container_resource_limits{namespace=\"geoip-authz\",container=\"geoip-authz\",resource=\"cpu\"})", "legendFormat": "{{pod}}" } ]
+    },
+    {
+      "id": 8, "title": "CPU Utilization (% of Request)", "type": "timeseries",
+      "description": "Per-pod CPU ÷ CPU request. Tells you if you're OVER-provisioned: a line riding far below the 100% reference means you reserved more than you use (lower the request). Above 100% = bursting above the reservation (Burstable QoS).",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 12 },
+      "fieldConfig": { "defaults": {
+        "unit": "percentunit", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "thresholdsStyle": { "mode": "line" } },
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "transparent" }, { "value": 1, "color": "blue" } ] }
+      } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"geoip-authz\",container=\"geoip-authz\"}[5m])) / on (pod) group_left() sum by (pod) (kube_pod_container_resource_requests{namespace=\"geoip-authz\",container=\"geoip-authz\",resource=\"cpu\"})", "legendFormat": "{{pod}}" } ]
+    },
+    {
+      "id": 9, "title": "CPU Throttling (% of Periods)", "type": "timeseries",
+      "description": "Fraction of CFS periods the container was throttled — the LEADING indicator behind latency-red. A CPU-limited service throttles before its latency visibly climbs.",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 12 },
+      "fieldConfig": { "defaults": {
+        "unit": "percentunit", "min": 0, "max": 1,
+        "color": { "mode": "thresholds" },
+        "custom": { "thresholdsStyle": { "mode": "line" } },
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" }, { "value": 0.01, "color": "yellow" }, { "value": 0.05, "color": "red" } ] }
+      } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace=\"geoip-authz\",container=\"geoip-authz\"}[5m])) / sum by (pod) (rate(container_cpu_cfs_periods_total{namespace=\"geoip-authz\",container=\"geoip-authz\"}[5m]))", "legendFormat": "{{pod}}" } ]
+    },
+    {
+      "id": 10, "title": "Memory Utilization (% of Limit)", "type": "timeseries",
+      "description": "Per-pod working set ÷ memory limit. At 1.0 the kernel OOM-kills, so red sits at 0.9 (under-provisioned signal).",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "fieldConfig": { "defaults": {
+        "unit": "percentunit", "min": 0, "max": 1,
+        "color": { "mode": "thresholds" },
+        "custom": { "thresholdsStyle": { "mode": "line" } },
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" }, { "value": 0.75, "color": "yellow" }, { "value": 0.9, "color": "red" } ] }
+      } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"geoip-authz\",container=\"geoip-authz\"}) / on (pod) group_left() sum by (pod) (kube_pod_container_resource_limits{namespace=\"geoip-authz\",container=\"geoip-authz\",resource=\"memory\"})", "legendFormat": "{{pod}}" } ]
+    },
+    {
+      "id": 11, "title": "Memory Utilization (% of Request)", "type": "timeseries",
+      "description": "Per-pod working set ÷ memory request. Below the 100% reference = over-provisioned (lower the request); riding above 100% = UNDER-requested (Burstable QoS, risks eviction under node pressure — raise the request).",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "fieldConfig": { "defaults": {
+        "unit": "percentunit", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "thresholdsStyle": { "mode": "line" } },
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "transparent" }, { "value": 1, "color": "blue" } ] }
+      } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"geoip-authz\",container=\"geoip-authz\"}) / on (pod) group_left() sum by (pod) (kube_pod_container_resource_requests{namespace=\"geoip-authz\",container=\"geoip-authz\",resource=\"memory\"})", "legendFormat": "{{pod}}" } ]
+    },
+    {
+      "id": 12, "title": "Verdicts by Reason", "type": "piechart",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 28 },
       "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (reason) (rate(geoip_authz_checks_total[1h]))", "legendFormat": "{{reason}}" } ]
     },
     {
-      "id": 8, "title": "Would-block / block rate", "type": "timeseries",
+      "id": 13, "title": "Would-Block / Block Rate", "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 12 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 28 },
       "fieldConfig": { "defaults": { "unit": "reqps" } },
       "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (reason) (rate(geoip_authz_checks_total{verdict=\"block\"}[5m]))", "legendFormat": "{{reason}}" } ]
     },
     {
-      "id": 9, "title": "DB refresh rate by outcome", "type": "timeseries",
+      "id": 14, "title": "In-Flight Checks (Saturation)", "type": "timeseries",
+      "description": "Concurrent ext_authz checks. Informational — the thresholded saturation signal is CPU (% of Limit). Sustained double digits here means checks are queuing.",
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 12 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 28 },
+      "fieldConfig": { "defaults": { "min": 0 } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum(geoip_authz_inflight_requests)", "legendFormat": "in-flight" } ]
+    },
+    {
+      "id": 15, "title": "DB Refresh Rate by Outcome", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
       "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${prometheus}" }, "expr": "sum by (success) (rate(geoip_authz_db_refresh_total[1h]))", "legendFormat": "success={{success}}" } ]
     },
     {
-      "id": 10, "title": "Recent logs", "type": "logs",
+      "id": 16, "title": "Recent Logs", "type": "logs",
       "datasource": { "type": "loki", "uid": "${loki}" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 44 },
       "options": { "showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "sortOrder": "Descending" },
       "targets": [ { "refId": "A", "datasource": { "type": "loki", "uid": "${loki}" }, "expr": "{namespace=\"geoip-authz\"} | json", "queryType": "range" } ]
     },
     {
-      "id": 11, "title": "Recent traces (requires OTEL_EXPORTER_OTLP_ENDPOINT)", "type": "table",
+      "id": 17, "title": "Recent Traces (Requires OTEL_EXPORTER_OTLP_ENDPOINT)", "type": "table",
       "datasource": { "type": "tempo", "uid": "${tempo}" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 54 },
       "targets": [ { "refId": "A", "datasource": { "type": "tempo", "uid": "${tempo}" }, "queryType": "traceqlSearch", "query": "{ resource.service.name = \"geoip-authz\" }", "limit": 20, "tableType": "traces" } ]
     }
   ]
