@@ -41,7 +41,9 @@ service:
 resources:
   requests:
     cpu: 50m
-    memory: 128Mi
+    # Working set is the in-memory GeoLite2-City DB (~130Mi+ and growing); request
+    # must cover it or the pod runs Burstable QoS and risks eviction under pressure.
+    memory: 192Mi
   limits:
     cpu: 500m
     memory: 256Mi
