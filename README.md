@@ -58,8 +58,10 @@ Every check sets `X-Geoip-Verdict` (`allow`/`block`), `X-Geoip-Country`,
 | Variable                  | Default                              | Notes                                            |
 |---------------------------|--------------------------------------|--------------------------------------------------|
 | `GEOIP_MODE`              | `detect`                             | `detect` (log only) or `enforce` (403)           |
-| `GEOIP_BLOCKED_COUNTRIES` | (empty)                              | comma-separated ISO-3166-1 alpha-2, e.g. `RU,IR` |
-| `GEOIP_BLOCKED_REGIONS`   | (empty)                              | comma-separated ISO-3166-2, e.g. `UA-43,UA-14`   |
+| `GEOIP_BLOCKED_COUNTRIES` | (empty)                              | comma/newline ISO-3166-1 alpha-2, e.g. `RU,IR` (startup-only) |
+| `GEOIP_BLOCKED_REGIONS`   | (empty)                              | comma/newline ISO-3166-2, e.g. `UA-43,UA-14` (startup-only)   |
+| `GEOIP_BLOCKLIST_DIR`      | (empty)                              | dir holding `countries`/`regions` files; **hot-reloaded** (takes precedence over the env lists) |
+| `GEOIP_BLOCKLIST_RELOAD_EVERY` | `30s`                           | how often `GEOIP_BLOCKLIST_DIR` is re-read for changes |
 | `GEOIP_FAIL_CLOSED`       | `true`                               | deny when the client can't be located            |
 | `GEOIP_LISTEN_ADDR`       | `:8080`                              | ext_authz + health server                        |
 | `GEOIP_DOWNLOAD_URL`      | MaxMind GeoLite2-City tar.gz         | point at a caching mirror (see below)            |
@@ -81,6 +83,32 @@ GEOIP_BLOCKED_COUNTRIES: |
 
 MaxMind credentials are **optional** — omit them when using `GEOIP_DB_PATH`, an
 unauthenticated mirror, or a proxy that injects its own auth.
+
+### Hot-reloading the blocklist (no restart)
+
+Environment variables are frozen when a container starts, so `GEOIP_BLOCKED_*`
+changes only apply on a pod restart. To change the policy **without** a restart,
+set `GEOIP_BLOCKLIST_DIR` to a directory containing two files — `countries` and
+`regions` (same comma/newline format) — and mount a ConfigMap there:
+
+```yaml
+# ConfigMap mounted at /etc/geoip-authz/blocklist
+data:
+  countries: |
+    RU
+    IR
+  regions: |
+    UA-43
+```
+
+The kubelet updates a mounted ConfigMap in place; the service re-reads the files
+every `GEOIP_BLOCKLIST_RELOAD_EVERY` (default 30s) and **atomically swaps** the
+policy when the content changes — in-flight checks finish against the old policy,
+subsequent ones see the new one. An unchanged read is a no-op; a read error
+retains the last-good policy. Reloads and the live blocklist size are exposed as
+metrics (`geoip_authz_blocklist_reload_total`, `geoip_authz_blocklist_size`) and
+logged as a `blocklist hot-reloaded` event. The bundled `kubernetes/` example and
+Helm chart wire this up by default (`hotReload: true`).
 
 ## Running
 

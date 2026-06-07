@@ -41,12 +41,13 @@ const (
 const (
 	envPrefix = "GEOIP_"
 
-	defaultListenAddr     = ":8080"
-	defaultDownloadURL    = "https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz"
-	defaultRefreshEvery   = 24 * time.Hour
-	defaultClientIPHeader = "X-Forwarded-For"
-	defaultHTTPTimeout    = 60 * time.Second
-	defaultFailClosed     = true
+	defaultListenAddr           = ":8080"
+	defaultDownloadURL          = "https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz"
+	defaultRefreshEvery         = 24 * time.Hour
+	defaultClientIPHeader       = "X-Forwarded-For"
+	defaultHTTPTimeout          = 60 * time.Second
+	defaultFailClosed           = true
+	defaultBlocklistReloadEvery = 30 * time.Second
 )
 
 // ErrInvalidMode is returned when GEOIP_MODE is neither detect nor enforce.
@@ -79,6 +80,14 @@ type Config struct {
 	// BlockedRegions is the ISO-3166-2 "<country>-<subdivision>" region
 	// blocklist (needs the GeoLite2-City database for subdivision granularity).
 	BlockedRegions []string
+	// BlocklistDir, when set, loads the country/region blocklist from files
+	// ("countries" and "regions") in this directory and HOT-RELOADS them on a
+	// timer. Mount a ConfigMap here so a compliance edit takes effect without a
+	// pod restart. When set, it takes precedence over the env-supplied
+	// BlockedCountries/BlockedRegions (which can't change in a running container).
+	BlocklistDir string
+	// BlocklistReloadEvery is how often BlocklistDir is re-read for changes.
+	BlocklistReloadEvery time.Duration
 	// FailClosed denies (rather than allows) when the client location can't be
 	// determined: missing/unparseable IP, lookup error, or DB not yet loaded.
 	FailClosed bool
@@ -96,6 +105,7 @@ func Load() (cfg Config, err error) {
 		DBPath:           getEnv("DB_PATH", ""),
 		BlockedCountries: getEnvList("BLOCKED_COUNTRIES"),
 		BlockedRegions:   getEnvList("BLOCKED_REGIONS"),
+		BlocklistDir:     getEnv("BLOCKLIST_DIR", ""),
 		FailClosed:       getEnvBool("FAIL_CLOSED", defaultFailClosed),
 	}
 
@@ -105,6 +115,11 @@ func Load() (cfg Config, err error) {
 	}
 
 	cfg.HTTPTimeout, err = getEnvDuration("HTTP_TIMEOUT", defaultHTTPTimeout)
+	if err != nil {
+		return cfg, err
+	}
+
+	cfg.BlocklistReloadEvery, err = getEnvDuration("BLOCKLIST_RELOAD_EVERY", defaultBlocklistReloadEvery)
 	if err != nil {
 		return cfg, err
 	}

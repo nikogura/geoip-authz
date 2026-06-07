@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: geoip-authz-blocklist
+data:
+  # Keys become files when mounted (see deployment.yaml). The kubelet updates a
+  # mounted ConfigMap in place and geoip-authz re-reads it on a timer, so editing
+  # this ConfigMap changes the policy WITHOUT a pod restart. Each file is one
+  # entry per line and/or comma-separated.
+  countries: |
+    RU
+    IR
+    KP
+  regions: |
+    UA-09
+    UA-14
+    UA-43

@@ -10,12 +10,6 @@ data:
   # mirror (e.g. geoip-cache-proxy) to spare MaxMind's rate limits in a fleet.
   # GEOIP_DOWNLOAD_URL: "https://geoip.example.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz"
   #
-  # List vars accept commas and/or newlines — a YAML block scalar is readable:
-  GEOIP_BLOCKED_COUNTRIES: |
-    RU
-    IR
-    KP
-  GEOIP_BLOCKED_REGIONS: |
-    UA-09
-    UA-14
-    UA-43
+  # The blocklist is mounted as files from blocklist-configmap.yaml and
+  # HOT-RELOADED by the service, so editing it takes effect without a pod restart.
+  GEOIP_BLOCKLIST_DIR: "/etc/geoip-authz/blocklist"

@@ -53,3 +53,17 @@ spec:
             capabilities:
               drop:
                 - ALL
+          {{- if .Values.hotReload }}
+          volumeMounts:
+            - name: blocklist
+              mountPath: /etc/geoip-authz/blocklist
+              readOnly: true
+          {{- end }}
+      {{- if .Values.hotReload }}
+      volumes:
+        # Mounted ConfigMap; the kubelet updates it in place and geoip-authz
+        # hot-reloads, so a policy edit needs no pod restart.
+        - name: blocklist
+          configMap:
+            name: {{ include "geoip-authz.fullname" . }}-blocklist
+      {{- end }}

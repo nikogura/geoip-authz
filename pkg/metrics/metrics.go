@@ -56,6 +56,7 @@ type Metrics struct {
 	duration metric.Float64Histogram   // latency
 	inflight metric.Int64UpDownCounter // saturation
 	refresh  metric.Int64Counter       // database refresh outcomes
+	reload   metric.Int64Counter       // blocklist hot-reload outcomes
 }
 
 // New builds a Metrics backed by an OTel MeterProvider with a Prometheus
@@ -133,6 +134,16 @@ func New() (m *Metrics, handler http.Handler, err error) {
 		return m, handler, err
 	}
 
+	m.reload, err = meter.Int64Counter(
+		"geoip.authz.blocklist.reload",
+		metric.WithDescription("Blocklist hot-reload attempts, by success."),
+	)
+	if err != nil {
+		err = fmt.Errorf("creating blocklist reload counter: %w", err)
+
+		return m, handler, err
+	}
+
 	handler = promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 
 	return m, handler, err
@@ -166,6 +177,43 @@ func (m *Metrics) RegisterDBLoaded(ready func() (loaded bool)) (err error) {
 	}
 
 	return err
+}
+
+// RegisterBlocklistSize registers an observable gauge reporting the number of
+// blocked countries and regions currently loaded, sampled from sizes at
+// collection time and labelled by scope ("country"/"region").
+func (m *Metrics) RegisterBlocklistSize(sizes func() (countries, regions int)) (err error) {
+	if m == nil {
+		return err
+	}
+
+	_, err = m.meter.Int64ObservableGauge(
+		"geoip.authz.blocklist.size",
+		metric.WithDescription("Entries in the active blocklist, by scope."),
+		metric.WithInt64Callback(func(_ context.Context, observer metric.Int64Observer) (cbErr error) {
+			countries, regions := sizes()
+			observer.Observe(int64(countries), metric.WithAttributes(attribute.String("scope", "country")))
+			observer.Observe(int64(regions), metric.WithAttributes(attribute.String("scope", "region")))
+
+			return cbErr
+		}),
+	)
+	if err != nil {
+		err = fmt.Errorf("registering blocklist_size gauge: %w", err)
+
+		return err
+	}
+
+	return err
+}
+
+// ObserveReload records a blocklist hot-reload attempt and its outcome.
+func (m *Metrics) ObserveReload(ctx context.Context, success bool) {
+	if m == nil {
+		return
+	}
+
+	m.reload.Add(ctx, 1, metric.WithAttributes(attribute.Bool("success", success)))
 }
 
 // ObserveCheck records one ext_authz check: the traffic/error counter (labelled

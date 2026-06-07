@@ -14,7 +14,10 @@
 
 package geoip
 
-import "strings"
+import (
+	"strings"
+	"sync/atomic"
+)
 
 // Reason codes surfaced in the verdict.
 const (
@@ -42,12 +45,20 @@ type Verdict struct {
 	RegionISO string
 }
 
+// blocklistSets is the immutable country/region policy snapshot held behind an
+// atomic pointer so the whole policy can be hot-swapped in one store, with no
+// lock on the read path.
+type blocklistSets struct {
+	countries map[string]struct{}
+	regions   map[string]struct{}
+}
+
 // Blocklist holds the operator-supplied country/region policy and the
-// fail-closed behaviour. It is immutable after construction and safe for
-// concurrent use.
+// fail-closed behaviour. The policy is swappable at runtime via Replace (the
+// sets are stored behind an atomic pointer), so the blocklist can be
+// hot-reloaded without restarting the process. Safe for concurrent use.
 type Blocklist struct {
-	countries  map[string]struct{}
-	regions    map[string]struct{}
+	sets       atomic.Pointer[blocklistSets]
 	failClosed bool
 }
 
@@ -56,13 +67,31 @@ type Blocklist struct {
 // upper-cased and trimmed. failClosed controls whether un-locatable clients are
 // denied.
 func NewBlocklist(countries, regions []string, failClosed bool) (b *Blocklist) {
-	b = &Blocklist{
-		countries:  toSet(countries),
-		regions:    toSet(regions),
-		failClosed: failClosed,
-	}
+	b = &Blocklist{failClosed: failClosed}
+	b.Replace(countries, regions)
 
 	return b
+}
+
+// Replace atomically swaps the country/region policy. It is safe to call
+// concurrently with Decide/Evaluate: in-flight decisions complete against the
+// previous snapshot and subsequent decisions see the new one. failClosed is set
+// at construction and not changed here.
+func (b *Blocklist) Replace(countries, regions []string) {
+	b.sets.Store(&blocklistSets{
+		countries: toSet(countries),
+		regions:   toSet(regions),
+	})
+}
+
+// Sizes returns the current count of blocked countries and regions, for
+// instrumentation.
+func (b *Blocklist) Sizes() (countries, regions int) {
+	current := b.sets.Load()
+	countries = len(current.countries)
+	regions = len(current.regions)
+
+	return countries, regions
 }
 
 // toSet normalises a list into an upper-cased, trimmed set.
@@ -104,14 +133,16 @@ func (b *Blocklist) Decide(country, subdivision string) (v Verdict) {
 		RegionISO:  region,
 	}
 
-	if _, blocked := b.countries[country]; blocked {
+	current := b.sets.Load()
+
+	if _, blocked := current.countries[country]; blocked {
 		v.Blocked = true
 		v.Reason = ReasonBlockedCountry
 
 		return v
 	}
 
-	if _, blocked := b.regions[region]; blocked {
+	if _, blocked := current.regions[region]; blocked {
 		v.Blocked = true
 		v.Reason = ReasonBlockedRegion
 

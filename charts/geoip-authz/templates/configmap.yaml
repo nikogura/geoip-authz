@@ -16,6 +16,12 @@ data:
   {{- with .Values.refreshEvery }}
   GEOIP_REFRESH_EVERY: {{ . | quote }}
   {{- end }}
+  {{- if .Values.hotReload }}
+  GEOIP_BLOCKLIST_DIR: /etc/geoip-authz/blocklist
+  {{- with .Values.reloadEvery }}
+  GEOIP_BLOCKLIST_RELOAD_EVERY: {{ . | quote }}
+  {{- end }}
+  {{- else }}
   {{- if .Values.blockedCountries }}
   GEOIP_BLOCKED_COUNTRIES: |
     {{- range .Values.blockedCountries }}
@@ -27,4 +33,5 @@ data:
     {{- range .Values.blockedRegions }}
     {{ . }}
     {{- end }}
+  {{- end }}
   {{- end }}

@@ -43,6 +43,11 @@ type Service struct {
 	blocklist *geoip.Blocklist
 	metrics   *metrics.Metrics
 	log       *slog.Logger
+
+	// blocklistFingerprint is the signature of the file-sourced policy currently
+	// applied, used to skip redundant swaps when a reload sees no change. Only
+	// touched by the single reload goroutine (and once at startup before it runs).
+	blocklistFingerprint string
 }
 
 // NewService builds a Service from resolved configuration.
@@ -72,6 +77,7 @@ func (s *Service) Run(ctx context.Context) (err error) {
 		"refresh_every", s.cfg.RefreshEvery.String(),
 		"blocked_countries", len(s.cfg.BlockedCountries),
 		"blocked_regions", len(s.cfg.BlockedRegions),
+		"blocklist_dir", s.cfg.BlocklistDir,
 		"fail_closed", s.cfg.FailClosed,
 	)
 
@@ -88,6 +94,13 @@ func (s *Service) Run(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+
+	err = s.metrics.RegisterBlocklistSize(s.blocklist.Sizes)
+	if err != nil {
+		return err
+	}
+
+	s.primeBlocklist(ctx)
 
 	s.primeDatabase(ctx)
 
@@ -117,6 +130,84 @@ func (s *Service) primeDatabase(ctx context.Context) {
 	}
 
 	s.log.InfoContext(ctx, "geoip database loaded")
+}
+
+// primeBlocklist performs the initial file-based blocklist load and starts the
+// hot-reload loop — but only when a blocklist directory is configured. Without
+// it, the env-supplied policy built in NewBlocklist stands and never changes
+// (env vars can't change in a running container, so there is nothing to reload).
+func (s *Service) primeBlocklist(ctx context.Context) {
+	if s.cfg.BlocklistDir == "" {
+		return
+	}
+
+	changed, err := s.reloadBlocklist()
+	s.metrics.ObserveReload(ctx, err == nil)
+
+	switch {
+	case err != nil:
+		s.log.ErrorContext(ctx, "initial blocklist load from dir failed; retaining env/empty policy",
+			"dir", s.cfg.BlocklistDir, "error", err.Error())
+	case changed:
+		countries, regions := s.blocklist.Sizes()
+		s.log.InfoContext(ctx, "blocklist loaded from files",
+			"dir", s.cfg.BlocklistDir, "countries", countries, "regions", regions)
+	}
+
+	go s.blocklistReloadLoop(ctx)
+}
+
+// reloadBlocklist reads the blocklist files and, when their contents differ from
+// what is currently applied, atomically swaps in the new policy. It returns
+// whether the policy actually changed (so unchanged ConfigMap projections don't
+// churn the live blocklist or spam events).
+func (s *Service) reloadBlocklist() (changed bool, err error) {
+	var countries, regions []string
+
+	countries, regions, err = geoip.LoadBlocklistFiles(s.cfg.BlocklistDir)
+	if err != nil {
+		return changed, err
+	}
+
+	fingerprint := geoip.Fingerprint(countries, regions)
+	if fingerprint == s.blocklistFingerprint {
+		return changed, err
+	}
+
+	s.blocklist.Replace(countries, regions)
+	s.blocklistFingerprint = fingerprint
+	changed = true
+
+	return changed, err
+}
+
+// blocklistReloadLoop periodically re-reads the blocklist directory so a
+// ConfigMap edit takes effect without a pod restart. A read error is logged and
+// the last-good policy retained (self-healing).
+func (s *Service) blocklistReloadLoop(ctx context.Context) {
+	ticker := time.NewTicker(s.cfg.BlocklistReloadEvery)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			changed, err := s.reloadBlocklist()
+			s.metrics.ObserveReload(ctx, err == nil)
+
+			if err != nil {
+				s.log.ErrorContext(ctx, "blocklist reload failed; retaining last-good", "error", err.Error())
+
+				continue
+			}
+
+			if changed {
+				countries, regions := s.blocklist.Sizes()
+				s.log.InfoContext(ctx, "blocklist hot-reloaded", "countries", countries, "regions", regions)
+			}
+		}
+	}
 }
 
 // loadOnce loads from a local file when DBPath is set, otherwise fetches the
