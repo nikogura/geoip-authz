@@ -15,16 +15,33 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version_tag: ${{ steps.semver.outputs.version_tag }}
+      version: ${{ steps.semver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Semver
+      # Compute the next semantic version from commit messages since the last
+      # tag (conventional-commits style):
+      #   - MAJOR  → a "type!:" subject (e.g. "feat!: ...") OR a "BREAKING CHANGE:"
+      #              / "BREAKING-CHANGE:" footer anywhere in a commit body.
+      #   - MINOR  → a "feat:" / "feat(scope):" subject.
+      #   - PATCH  → anything else.
+      # Outputs `version` (1.2.3) and `version_tag` (v1.2.3). bump_each_commit was
+      # on before, which ignored commit messages and could only ever increment —
+      # breaking changes and feat: minors were impossible to release correctly.
+      - name: Generate Version
         id: semver
-        uses: paulhatch/semantic-version@v5.1.0
+        uses: paulhatch/semantic-version@v5.4.0
         with:
-          bump_each_commit: true
+          tag_prefix: "v"
+          version_format: "${major}.${minor}.${patch}"
+          major_pattern: '/^[a-z]+(\([^)]+\))?!:|BREAKING[ -]CHANGE:/'
+          major_regexp_flags: "im"
+          minor_pattern: '/^feat(\([^)]+\))?:/'
+          minor_regexp_flags: "im"
+          search_commit_body: true
+          bump_each_commit: false
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -47,6 +64,8 @@ jobs:
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
 
       - name: Lint
         run: make lint
@@ -85,26 +104,32 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ needs.test.outputs.version }}
           tags: |
             ghcr.io/nikogura/geoip-authz:${{ needs.test.outputs.version_tag }}
             ghcr.io/nikogura/geoip-authz:latest
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
 
       # Publish the chart as an OCI artifact to ghcr alongside the image.
       - name: Package and push Helm chart
         run: |
-          VERSION="${{ needs.test.outputs.version_tag }}"
-          VERSION="${VERSION#v}"
-          helm registry login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
-          helm package charts/geoip-authz --version "$VERSION" --app-version "$VERSION"
-          helm push "geoip-authz-${VERSION}.tgz" oci://ghcr.io/nikogura/charts
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm package charts/geoip-authz \
+            --version ${{ needs.test.outputs.version }} \
+            --app-version ${{ needs.test.outputs.version }}
+          helm push "geoip-authz-${{ needs.test.outputs.version }}.tgz" oci://ghcr.io/nikogura/charts
 
-      # Auto-release: creates the git tag and a GitHub Release for this version.
-      - name: Release
+      # The release creates the git tag (single `v` prefix) and the GitHub Release.
+      - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.test.outputs.version_tag }}
           name: ${{ needs.test.outputs.version_tag }}
-          generate_release_notes: true
+          draft: false
+          prerelease: false
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -9,6 +9,11 @@ FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
+# VERSION is stamped into the binary via ldflags (consumed by `geoip-authz
+# version` and the tracing service name). CI passes the computed semantic
+# version; a bare local build defaults to "dev".
+ARG VERSION=dev
+
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -16,7 +21,8 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -trimpath -o /geoip-authz .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -ldflags="-s -w -X github.com/nikogura/geoip-authz/cmd.Version=${VERSION}" -trimpath -o /geoip-authz .
 
 # Runtime: distroless static (multi-arch) for a zero-CGO binary.
 FROM gcr.io/distroless/static-debian12:nonroot
