@@ -54,12 +54,13 @@ type blocklistSets struct {
 }
 
 // Blocklist holds the operator-supplied country/region policy and the
-// fail-closed behaviour. The policy is swappable at runtime via Replace (the
-// sets are stored behind an atomic pointer), so the blocklist can be
-// hot-reloaded without restarting the process. Safe for concurrent use.
+// fail-closed behaviour. Both are swappable at runtime via Replace (the sets
+// behind an atomic pointer, fail-closed behind an atomic bool), so the whole
+// policy can be hot-reloaded without restarting the process. Safe for
+// concurrent use.
 type Blocklist struct {
 	sets       atomic.Pointer[blocklistSets]
-	failClosed bool
+	failClosed atomic.Bool
 }
 
 // NewBlocklist builds a Blocklist from lists of ISO-3166-1 alpha-2 country
@@ -67,21 +68,23 @@ type Blocklist struct {
 // upper-cased and trimmed. failClosed controls whether un-locatable clients are
 // denied.
 func NewBlocklist(countries, regions []string, failClosed bool) (b *Blocklist) {
-	b = &Blocklist{failClosed: failClosed}
-	b.Replace(countries, regions)
+	b = &Blocklist{}
+	b.Replace(countries, regions, failClosed)
 
 	return b
 }
 
-// Replace atomically swaps the country/region policy. It is safe to call
-// concurrently with Decide/Evaluate: in-flight decisions complete against the
-// previous snapshot and subsequent decisions see the new one. failClosed is set
-// at construction and not changed here.
-func (b *Blocklist) Replace(countries, regions []string) {
+// Replace atomically swaps the country/region policy and the fail-closed
+// behaviour. It is safe to call concurrently with Decide/Evaluate: in-flight
+// decisions complete against the previous snapshot and subsequent decisions see
+// the new one. fail-closed is swapped too so a hot-reload can flip it without a
+// restart.
+func (b *Blocklist) Replace(countries, regions []string, failClosed bool) {
 	b.sets.Store(&blocklistSets{
 		countries: toSet(countries),
 		regions:   toSet(regions),
 	})
+	b.failClosed.Store(failClosed)
 }
 
 // Sizes returns the current count of blocked countries and regions, for
@@ -119,7 +122,7 @@ func (b *Blocklist) Decide(country, subdivision string) (v Verdict) {
 	subdivision = strings.ToUpper(strings.TrimSpace(subdivision))
 
 	if country == "" {
-		v = Verdict{Blocked: b.failClosed, Reason: ReasonLookupFailed}
+		v = Verdict{Blocked: b.failClosed.Load(), Reason: ReasonLookupFailed}
 
 		return v
 	}

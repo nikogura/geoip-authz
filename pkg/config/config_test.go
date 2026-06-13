@@ -15,6 +15,8 @@
 package config_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -22,70 +24,229 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoad_Defaults(t *testing.T) {
-	// Not parallel: mutates process environment.
-	t.Setenv("GEOIP_MODE", "")
-	t.Setenv("GEOIP_REFRESH_EVERY", "")
+// writeConfig writes body to a temp config.yaml and returns its path.
+func writeConfig(t *testing.T, body string) (path string) {
+	t.Helper()
 
-	cfg, err := config.Load()
+	path = filepath.Join(t.TempDir(), "config.yaml")
+
+	err := os.WriteFile(path, []byte(body), 0o600)
 	require.NoError(t, err)
+
+	return path
+}
+
+// fullConfig exercises every field, with the blocklist in `|` block-scalar form
+// (one entry per line) — the ergonomics carried over from the old blocklist
+// files.
+const fullConfig = `
+mode: enforce
+failClosed: false
+listenAddr: ":9090"
+geoDownloadURL: "https://mirror.example/db.tar.gz"
+refreshEvery: 1h
+httpTimeout: 5s
+clientIPHeader: "X-Real-IP"
+dbPath: "/data/city.mmdb"
+reloadEvery: 15s
+blocklist:
+  countries: |
+    IR
+    KP
+    RU
+  regions: |
+    UA-09
+    UA-14
+`
+
+func TestLoadFile_FullConfig(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, fullConfig)
+
+	cfg, err := config.LoadFile(path)
+	require.NoError(t, err)
+
+	require.Equal(t, config.ModeEnforce, cfg.Mode)
+	require.False(t, cfg.FailClosed)
+	require.Equal(t, ":9090", cfg.ListenAddr)
+	require.Equal(t, "https://mirror.example/db.tar.gz", cfg.DownloadURL)
+	require.Equal(t, time.Hour, cfg.RefreshEvery)
+	require.Equal(t, 5*time.Second, cfg.HTTPTimeout)
+	require.Equal(t, "X-Real-IP", cfg.ClientIPHeader)
+	require.Equal(t, "/data/city.mmdb", cfg.DBPath)
+	require.Equal(t, 15*time.Second, cfg.ReloadEvery)
+	require.Equal(t, []string{"IR", "KP", "RU"}, cfg.BlockedCountries)
+	require.Equal(t, []string{"UA-09", "UA-14"}, cfg.BlockedRegions)
+	require.Equal(t, path, cfg.ConfigFile)
+}
+
+func TestLoadFile_Defaults(t *testing.T) {
+	t.Parallel()
+
+	// Minimal file: only mode set; everything else must default.
+	path := writeConfig(t, "mode: detect\n")
+
+	cfg, err := config.LoadFile(path)
+	require.NoError(t, err)
+
 	require.Equal(t, config.ModeDetect, cfg.Mode)
 	require.Equal(t, ":8080", cfg.ListenAddr)
 	require.Equal(t, 24*time.Hour, cfg.RefreshEvery)
-	require.True(t, cfg.FailClosed, "fail-closed must default true")
+	require.Equal(t, 60*time.Second, cfg.HTTPTimeout)
+	require.Equal(t, "X-Forwarded-For", cfg.ClientIPHeader)
+	require.Equal(t, 30*time.Second, cfg.ReloadEvery)
+	require.True(t, cfg.FailClosed, "fail-closed must default true when omitted")
 	require.Empty(t, cfg.BlockedCountries)
+	require.Empty(t, cfg.BlockedRegions)
 }
 
-func TestLoad_OverridesFromEnv(t *testing.T) {
-	t.Setenv("GEOIP_MODE", "enforce")
-	t.Setenv("GEOIP_REFRESH_EVERY", "1h")
-	t.Setenv("GEOIP_ACCOUNT_ID", "424242")
-	t.Setenv("GEOIP_LICENSE_KEY", "secret")
-	t.Setenv("GEOIP_BLOCKED_COUNTRIES", "IR, KP ,RU")
-	t.Setenv("GEOIP_BLOCKED_REGIONS", "UA-43")
-	t.Setenv("GEOIP_FAIL_CLOSED", "false")
+func TestLoadFile_ModeDefaultsToDetectAndLowercases(t *testing.T) {
+	t.Parallel()
 
-	cfg, err := config.Load()
+	empty := writeConfig(t, "{}\n")
+	cfg, err := config.LoadFile(empty)
 	require.NoError(t, err)
-	require.Equal(t, config.ModeEnforce, cfg.Mode)
-	require.Equal(t, time.Hour, cfg.RefreshEvery)
-	require.Equal(t, "424242", cfg.AccountID)
-	require.Equal(t, "secret", cfg.LicenseKey)
-	require.Equal(t, []string{"IR", "KP", "RU"}, cfg.BlockedCountries, "comma list must trim and split")
-	require.Equal(t, []string{"UA-43"}, cfg.BlockedRegions)
+	require.Equal(t, config.ModeDetect, cfg.Mode, "empty file → detect")
+
+	upper := writeConfig(t, "mode: ENFORCE\n")
+	cfg, err = config.LoadFile(upper)
+	require.NoError(t, err)
+	require.Equal(t, config.ModeEnforce, cfg.Mode, "mode must lowercase")
+}
+
+func TestLoadFile_InvalidModeRejected(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, "mode: block\n")
+
+	_, err := config.LoadFile(path)
+	require.ErrorIs(t, err, config.ErrInvalidMode, "'block' is not a valid mode")
+}
+
+func TestLoadFile_FailClosedRespectsExplicitFalse(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, "mode: detect\nfailClosed: false\n")
+
+	cfg, err := config.LoadFile(path)
+	require.NoError(t, err)
 	require.False(t, cfg.FailClosed)
 }
 
-func TestLoad_BlocklistNewlineAndMixed(t *testing.T) {
-	// YAML `|` block-scalar form: newline-separated, indented.
-	t.Setenv("GEOIP_BLOCKED_COUNTRIES", "IR\n  KP\nRU\n")
-	// Mixed comma + newline must also work.
-	t.Setenv("GEOIP_BLOCKED_REGIONS", "UA-09,\nUA-14\nUA-43")
+func TestLoadFile_ListFormsAllParse(t *testing.T) {
+	t.Parallel()
 
-	cfg, err := config.Load()
-	require.NoError(t, err)
-	require.Equal(t, []string{"IR", "KP", "RU"}, cfg.BlockedCountries)
-	require.Equal(t, []string{"UA-09", "UA-14", "UA-43"}, cfg.BlockedRegions)
+	cases := map[string]string{
+		"block scalar":      "blocklist:\n  countries: |\n    IR\n    KP\n    RU\n",
+		"comma inline":      "blocklist:\n  countries: \"IR, KP ,RU\"\n",
+		"yaml sequence":     "blocklist:\n  countries: [IR, KP, RU]\n",
+		"comma+newline mix": "blocklist:\n  countries: |\n    IR, KP\n    RU\n",
+	}
+
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfig(t, "mode: detect\n"+body)
+
+			cfg, err := config.LoadFile(path)
+			require.NoError(t, err)
+			require.Equal(t, []string{"IR", "KP", "RU"}, cfg.BlockedCountries)
+		})
+	}
 }
 
-func TestLoad_InvalidModeRejected(t *testing.T) {
-	t.Setenv("GEOIP_MODE", "audit")
+func TestLoadFile_InvalidDurationRejected(t *testing.T) {
+	t.Parallel()
 
-	_, err := config.Load()
+	path := writeConfig(t, "mode: detect\nrefreshEvery: \"not-a-duration\"\n")
+
+	_, err := config.LoadFile(path)
+	require.Error(t, err)
+}
+
+func TestLoadFile_SecretsComeFromEnvNotFile(t *testing.T) {
+	// Not parallel: mutates process environment.
+	t.Setenv("GEOIP_ACCOUNT_ID", "424242")
+	t.Setenv("GEOIP_LICENSE_KEY", "s3cret")
+
+	path := writeConfig(t, "mode: enforce\n")
+
+	cfg, err := config.LoadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "424242", cfg.AccountID)
+	require.Equal(t, "s3cret", cfg.LicenseKey)
+}
+
+func TestLoadFile_MissingFileErrors(t *testing.T) {
+	t.Parallel()
+
+	_, err := config.LoadFile(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	require.Error(t, err)
+}
+
+func TestLoadRuntime_ReturnsHotSubset(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, fullConfig)
+
+	rt, err := config.LoadRuntime(path)
+	require.NoError(t, err)
+	require.Equal(t, config.ModeEnforce, rt.Mode)
+	require.False(t, rt.FailClosed)
+	require.Equal(t, []string{"IR", "KP", "RU"}, rt.Countries)
+	require.Equal(t, []string{"UA-09", "UA-14"}, rt.Regions)
+}
+
+func TestLoadRuntime_InvalidModeRejected(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, "mode: nonsense\n")
+
+	_, err := config.LoadRuntime(path)
 	require.ErrorIs(t, err, config.ErrInvalidMode)
 }
 
-func TestParseAccountID(t *testing.T) {
+func TestRuntimeFingerprint(t *testing.T) {
 	t.Parallel()
 
-	id, err := config.ParseAccountID("12345")
-	require.NoError(t, err)
-	require.Equal(t, 12345, id)
+	base := config.Runtime{
+		Mode:       config.ModeEnforce,
+		FailClosed: true,
+		Countries:  []string{"IR", "KP"},
+		Regions:    []string{"UA-43"},
+	}
 
-	id, err = config.ParseAccountID("")
-	require.NoError(t, err)
-	require.Equal(t, 0, id)
+	// Order- and case-independent over the lists.
+	reordered := config.Runtime{
+		Mode:       config.ModeEnforce,
+		FailClosed: true,
+		Countries:  []string{"kp", " ir "},
+		Regions:    []string{"ua-43"},
+	}
+	require.Equal(t, base.Fingerprint(), reordered.Fingerprint(),
+		"fingerprint must be order- and case-independent")
 
-	_, err = config.ParseAccountID("abc")
-	require.Error(t, err)
+	// Each material field changes the fingerprint.
+	modeChanged := base
+	modeChanged.Mode = config.ModeDetect
+	require.NotEqual(t, base.Fingerprint(), modeChanged.Fingerprint(), "mode change must show")
+
+	fcChanged := base
+	fcChanged.FailClosed = false
+	require.NotEqual(t, base.Fingerprint(), fcChanged.Fingerprint(), "fail-closed change must show")
+
+	listChanged := base
+	listChanged.Countries = []string{"IR", "KP", "RU"}
+	require.NotEqual(t, base.Fingerprint(), listChanged.Fingerprint(), "list change must show")
+}
+
+func TestConfigFilePath(t *testing.T) {
+	// Not parallel: mutates process environment.
+	t.Setenv("GEOIP_CONFIG_FILE", "")
+	require.Equal(t, config.DefaultConfigFile, config.ConfigFilePath())
+
+	t.Setenv("GEOIP_CONFIG_FILE", "/custom/path.yaml")
+	require.Equal(t, "/custom/path.yaml", config.ConfigFilePath())
 }

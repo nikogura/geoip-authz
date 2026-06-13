@@ -37,14 +37,14 @@ type Resolver interface {
 // by the controller.
 func (b *Blocklist) Evaluate(r Resolver, ip net.IP) (v Verdict) {
 	if ip == nil {
-		v = Verdict{Blocked: b.failClosed, Reason: ReasonNoClientAddress}
+		v = Verdict{Blocked: b.failClosed.Load(), Reason: ReasonNoClientAddress}
 
 		return v
 	}
 
 	res, err := r.Resolve(ip)
 	if err != nil {
-		v = Verdict{Blocked: b.failClosed, Reason: ReasonLookupFailed}
+		v = Verdict{Blocked: b.failClosed.Load(), Reason: ReasonLookupFailed}
 
 		return v
 	}

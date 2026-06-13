@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/nikogura/geoip-authz/pkg/authz"
@@ -56,8 +57,13 @@ func (s byIP) Resolve(ip net.IP) (res geoip.GeoResult, err error) {
 
 func handler(mode config.Mode, r geoip.Resolver, ready func() (ok bool)) (h http.Handler) {
 	bl := geoip.NewBlocklist([]string{"RU", "IR"}, []string{"UA-43"}, true)
+	modeFn := func() (m config.Mode) {
+		m = mode
+
+		return m
+	}
 	// nil metrics — instrumentation is no-op'd in unit tests.
-	h = authz.NewHandler(bl, r, ready, mode, "X-Forwarded-For", nil, nil).Routes()
+	h = authz.NewHandler(bl, r, ready, modeFn, "X-Forwarded-For", nil, nil).Routes()
 
 	return h
 }
@@ -133,6 +139,34 @@ func TestCheck_UsesLeftmostXFFEntry(t *testing.T) {
 
 	rec := do(handler(config.ModeEnforce, byIP{blocked: "5.255.255.5"}, alwaysReady), "5.255.255.5, 10.0.0.1, 10.0.0.2")
 	require.Equal(t, http.StatusForbidden, rec.Code, "must use the left-most XFF entry")
+}
+
+// TestCheck_ModeIsHotSwappable proves the handler reads mode through its getter
+// on every request, so a reload that flips mode takes effect with no rebuild of
+// the handler and no process restart.
+func TestCheck_ModeIsHotSwappable(t *testing.T) {
+	t.Parallel()
+
+	var mode atomic.Pointer[config.Mode]
+
+	detect := config.ModeDetect
+	mode.Store(&detect)
+
+	bl := geoip.NewBlocklist([]string{"RU"}, nil, true)
+	modeFn := func() (m config.Mode) {
+		m = *mode.Load()
+
+		return m
+	}
+	h := authz.NewHandler(bl, fakeResolver{res: geoip.GeoResult{CountryISO: "RU"}}, alwaysReady, modeFn, "X-Forwarded-For", nil, nil).Routes()
+
+	require.Equal(t, http.StatusOK, do(h, "5.255.255.5").Code, "detect must not block")
+
+	// Flip to enforce live — same handler instance.
+	enforce := config.ModeEnforce
+	mode.Store(&enforce)
+
+	require.Equal(t, http.StatusForbidden, do(h, "5.255.255.5").Code, "mode flip must take effect with no rebuild")
 }
 
 func TestHealth(t *testing.T) {

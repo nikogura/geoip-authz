@@ -15,6 +15,7 @@
 package geoip_test
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/nikogura/geoip-authz/pkg/geoip"
@@ -128,4 +129,67 @@ func TestDecide_CaseAndWhitespaceInsensitive(t *testing.T) {
 	b := geoip.NewBlocklist([]string{" ru "}, []string{" ua-43 "}, true)
 	require.True(t, b.Decide(" ru ", "").Blocked, "lowercase/padded country must match")
 	require.True(t, b.Decide("ua", "43").Blocked, "lowercase region must match")
+}
+
+func TestReplace_HotSwapsPolicyAndFailClosed(t *testing.T) {
+	t.Parallel()
+
+	// Start fail-open with only IR blocked.
+	b := geoip.NewBlocklist([]string{"IR"}, nil, false)
+	require.False(t, b.Decide("RU", "").Blocked, "RU not yet blocked")
+	require.False(t, b.Decide("", "").Blocked, "fail-open allows an un-locatable client")
+
+	// Replace swaps the lists AND the fail-closed behaviour atomically.
+	b.Replace([]string{"IR", "RU"}, []string{"UA-43"}, true)
+	require.True(t, b.Decide("RU", "").Blocked, "RU blocked after Replace")
+	require.True(t, b.Decide("UA", "43").Blocked, "UA-43 region blocked after Replace")
+	require.True(t, b.Decide("", "").Blocked, "fail-closed now blocks an un-locatable client")
+
+	countries, regions := b.Sizes()
+	require.Equal(t, 2, countries)
+	require.Equal(t, 1, regions)
+
+	// Clear everything and go fail-open again.
+	b.Replace(nil, nil, false)
+	require.False(t, b.Decide("RU", "").Blocked, "cleared blocklist allows RU")
+	require.False(t, b.Decide("", "").Blocked, "fail-open again allows an un-locatable client")
+}
+
+// TestBlocklist_ConcurrentReplaceAndDecide exercises the atomic swap under the
+// race detector: readers must never observe a torn/half-updated policy.
+func TestBlocklist_ConcurrentReplaceAndDecide(t *testing.T) {
+	t.Parallel()
+
+	b := geoip.NewBlocklist([]string{"IR"}, nil, true)
+
+	var wg sync.WaitGroup
+
+	for range 8 {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for range 1000 {
+				_ = b.Decide("IR", "")
+				_, _ = b.Sizes()
+			}
+		}()
+	}
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		for i := range 1000 {
+			if i%2 == 0 {
+				b.Replace([]string{"IR", "RU"}, []string{"UA-43"}, true)
+			} else {
+				b.Replace([]string{"KP"}, nil, false)
+			}
+		}
+	}()
+
+	wg.Wait()
 }

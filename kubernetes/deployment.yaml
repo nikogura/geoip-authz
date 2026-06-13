@@ -25,8 +25,8 @@ spec:
             - name: http
               containerPort: 8080
           envFrom:
-            - configMapRef:
-                name: geoip-authz
+            # MaxMind basic-auth creds (GEOIP_ACCOUNT_ID / GEOIP_LICENSE_KEY).
+            # Everything else is the mounted config.yaml, not env.
             - secretRef:
                 name: geoip-authz   # optional — remove if not using MaxMind creds
           readinessProbe:
@@ -53,12 +53,15 @@ spec:
               drop:
                 - ALL
           volumeMounts:
-            - name: blocklist
-              mountPath: /etc/geoip-authz/blocklist
+            # Whole-ConfigMap directory mount (NOT subPath) so the kubelet
+            # updates config.yaml in place and the service hot-reloads it.
+            - name: config
+              mountPath: /etc/geoip-authz
               readOnly: true
       volumes:
-        # Mounted ConfigMap; updated in place by the kubelet and hot-reloaded by
-        # the service, so a policy edit needs no pod restart.
-        - name: blocklist
+        # Single config file as a mounted ConfigMap; updated in place by the
+        # kubelet and hot-reloaded by the service, so a policy edit (mode,
+        # failClosed, blocklist) needs no pod restart.
+        - name: config
           configMap:
-            name: geoip-authz-blocklist
+            name: geoip-authz

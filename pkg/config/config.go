@@ -12,18 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package config resolves geoip-authz runtime configuration from the
-// environment (GEOIP_ prefix). The blocklist and database source are
-// configuration, not code, so the service stays policy-neutral and reusable.
+// Package config resolves geoip-authz runtime configuration from a single
+// YAML config file (file-authoritative). The blocklist, mode, and fail-closed
+// behaviour are configuration, not code, so the service stays policy-neutral
+// and reusable. The hot-reloadable subset (mode, fail-closed, blocklist) is
+// re-read on a timer so a compliance edit takes effect without a pod restart.
+//
+// The MaxMind credentials are the only exception to "file-authoritative": they
+// are injected from the environment (GEOIP_ACCOUNT_ID / GEOIP_LICENSE_KEY) so a
+// secret never lives in a ConfigMap. The config file path itself comes from
+// GEOIP_CONFIG_FILE.
 package config
 
 import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Mode controls whether the service blocks (enforce) or only annotates and
@@ -39,90 +49,205 @@ const (
 )
 
 const (
+	// envPrefix namespaces the few remaining environment inputs: the config
+	// file path and the MaxMind secret credentials.
 	envPrefix = "GEOIP_"
 
-	defaultListenAddr           = ":8080"
-	defaultDownloadURL          = "https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz"
-	defaultRefreshEvery         = 24 * time.Hour
-	defaultClientIPHeader       = "X-Forwarded-For"
-	defaultHTTPTimeout          = 60 * time.Second
-	defaultFailClosed           = true
-	defaultBlocklistReloadEvery = 30 * time.Second
+	// DefaultConfigFile is read when GEOIP_CONFIG_FILE is unset. Mount the
+	// unified ConfigMap (key "config.yaml") at this path.
+	DefaultConfigFile = "/etc/geoip-authz/config.yaml"
+
+	defaultListenAddr     = ":8080"
+	defaultDownloadURL    = "https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz"
+	defaultRefreshEvery   = 24 * time.Hour
+	defaultClientIPHeader = "X-Forwarded-For"
+	defaultHTTPTimeout    = 60 * time.Second
+	defaultReloadEvery    = 30 * time.Second
+	defaultFailClosed     = true
 )
 
-// ErrInvalidMode is returned when GEOIP_MODE is neither detect nor enforce.
+// ErrInvalidMode is returned when mode is neither detect nor enforce.
 var ErrInvalidMode = errors.New("invalid mode: must be 'detect' or 'enforce'")
+
+// StringList is a list of strings that unmarshals from EITHER a YAML scalar /
+// block scalar (split on commas and/or newlines, so a `|` block stays
+// one-entry-per-line and readable) OR a real YAML sequence. Entries are
+// trimmed; empties dropped. This keeps the blocklist's original file ergonomics
+// while living inside the unified config file.
+type StringList []string
+
+// UnmarshalYAML accepts both the scalar (comma/newline-separated) and the
+// sequence forms.
+func (s *StringList) UnmarshalYAML(value *yaml.Node) (err error) {
+	// A scalar (including a `|` block) is split on commas/newlines so a block
+	// stays one-entry-per-line and readable.
+	if value.Kind == yaml.ScalarNode {
+		*s = StringList(splitList(value.Value))
+
+		return err
+	}
+
+	// A real YAML sequence is decoded and trimmed.
+	if value.Kind == yaml.SequenceNode {
+		var items []string
+
+		err = value.Decode(&items)
+		if err != nil {
+			err = fmt.Errorf("decoding list sequence: %w", err)
+
+			return err
+		}
+
+		*s = StringList(trimDrop(items))
+
+		return err
+	}
+
+	err = fmt.Errorf("list must be a scalar block or sequence, got yaml kind %d", value.Kind)
+
+	return err
+}
+
+// Duration wraps time.Duration so a YAML value like "30s" parses via
+// time.ParseDuration (yaml.v3 otherwise expects an integer nanosecond count).
+type Duration time.Duration
+
+// UnmarshalYAML parses a Go duration string (e.g. "30s", "24h").
+func (d *Duration) UnmarshalYAML(value *yaml.Node) (err error) {
+	var parsed time.Duration
+
+	parsed, err = time.ParseDuration(strings.TrimSpace(value.Value))
+	if err != nil {
+		err = fmt.Errorf("parsing duration %q: %w", value.Value, err)
+
+		return err
+	}
+
+	*d = Duration(parsed)
+
+	return err
+}
+
+// Blocklist is the country/region policy section of the config file.
+type Blocklist struct {
+	// Countries is the ISO-3166-1 alpha-2 country blocklist.
+	Countries StringList `yaml:"countries"`
+	// Regions is the ISO-3166-2 "<country>-<subdivision>" region blocklist
+	// (needs the GeoLite2-City database for subdivision granularity).
+	Regions StringList `yaml:"regions"`
+}
+
+// fileConfig is the on-disk YAML shape. It is deliberately separate from the
+// resolved Config so optional fields can default safely — notably failClosed,
+// whose safe default is true and so cannot be a plain bool (which would make an
+// omitted value mean false).
+type fileConfig struct {
+	ListenAddr     string    `yaml:"listenAddr"`
+	DownloadURL    string    `yaml:"geoDownloadURL"`
+	RefreshEvery   *Duration `yaml:"refreshEvery"`
+	HTTPTimeout    *Duration `yaml:"httpTimeout"`
+	ClientIPHeader string    `yaml:"clientIPHeader"`
+	DBPath         string    `yaml:"dbPath"`
+	ReloadEvery    *Duration `yaml:"reloadEvery"`
+	Mode           Mode      `yaml:"mode"`
+	FailClosed     *bool     `yaml:"failClosed"`
+	Blocklist      Blocklist `yaml:"blocklist"`
+}
 
 // Config is the fully-resolved service configuration.
 type Config struct {
+	// --- boot config (from the file; a change requires a restart) ---
+
 	// ListenAddr is the address the HTTP server binds (ext_authz + health).
 	ListenAddr string
-	// Mode is detect or enforce.
-	Mode Mode
-	// DownloadURL is the GeoLite2-City tar.gz endpoint. Defaults to MaxMind;
-	// point it at a caching mirror to avoid hitting MaxMind from every replica.
+	// DownloadURL is the GeoLite2-City tar.gz endpoint. Point it at a caching
+	// mirror so replicas do not each hit MaxMind.
 	DownloadURL string
-	// AccountID is the MaxMind account ID used for basic-auth to the download.
-	AccountID string
-	// LicenseKey is the MaxMind license key used for basic-auth to the download.
-	LicenseKey string
 	// RefreshEvery is how often the database is re-pulled.
 	RefreshEvery time.Duration
 	// HTTPTimeout bounds the database download request.
 	HTTPTimeout time.Duration
-	// ClientIPHeader is the request header carrying the client IP (default
-	// X-Forwarded-For). The left-most address is used.
+	// ClientIPHeader carries the client IP (default X-Forwarded-For); the
+	// left-most address is used.
 	ClientIPHeader string
 	// DBPath, when set, loads a local .mmdb instead of downloading.
 	DBPath string
-	// BlockedCountries is the ISO-3166-1 alpha-2 country blocklist.
-	BlockedCountries []string
-	// BlockedRegions is the ISO-3166-2 "<country>-<subdivision>" region
-	// blocklist (needs the GeoLite2-City database for subdivision granularity).
-	BlockedRegions []string
-	// BlocklistDir, when set, loads the country/region blocklist from files
-	// ("countries" and "regions") in this directory and HOT-RELOADS them on a
-	// timer. Mount a ConfigMap here so a compliance edit takes effect without a
-	// pod restart. When set, it takes precedence over the env-supplied
-	// BlockedCountries/BlockedRegions (which can't change in a running container).
-	BlocklistDir string
-	// BlocklistReloadEvery is how often BlocklistDir is re-read for changes.
-	BlocklistReloadEvery time.Duration
-	// FailClosed denies (rather than allows) when the client location can't be
+	// ReloadEvery is how often the config file is re-read for the
+	// hot-reloadable subset (mode, fail-closed, blocklist).
+	ReloadEvery time.Duration
+
+	// --- hot-reloadable config (from the file; re-read on ReloadEvery) ---
+
+	// Mode is detect or enforce.
+	Mode Mode
+	// FailClosed denies (rather than allows) when the client location cannot be
 	// determined: missing/unparseable IP, lookup error, or DB not yet loaded.
 	FailClosed bool
+	// BlockedCountries is the resolved ISO-3166-1 alpha-2 country blocklist.
+	BlockedCountries []string
+	// BlockedRegions is the resolved ISO-3166-2 region blocklist.
+	BlockedRegions []string
+
+	// --- secrets (env-injected from the Vault Secret; never in the file) ---
+
+	// AccountID is the MaxMind account ID used for basic-auth to the download.
+	AccountID string
+	// LicenseKey is the MaxMind license key used for basic-auth to the download.
+	LicenseKey string
+
+	// ConfigFile is the path this config was loaded from (used for hot-reload).
+	ConfigFile string
 }
 
-// Load resolves the configuration from the environment, applying defaults.
-func Load() (cfg Config, err error) {
-	cfg = Config{
-		ListenAddr:       getEnv("LISTEN_ADDR", defaultListenAddr),
-		Mode:             Mode(strings.ToLower(getEnv("MODE", string(ModeDetect)))),
-		DownloadURL:      getEnv("DOWNLOAD_URL", defaultDownloadURL),
-		AccountID:        getEnv("ACCOUNT_ID", ""),
-		LicenseKey:       getEnv("LICENSE_KEY", ""),
-		ClientIPHeader:   getEnv("CLIENT_IP_HEADER", defaultClientIPHeader),
-		DBPath:           getEnv("DB_PATH", ""),
-		BlockedCountries: getEnvList("BLOCKED_COUNTRIES"),
-		BlockedRegions:   getEnvList("BLOCKED_REGIONS"),
-		BlocklistDir:     getEnv("BLOCKLIST_DIR", ""),
-		FailClosed:       getEnvBool("FAIL_CLOSED", defaultFailClosed),
-	}
+// Runtime is the hot-reloadable subset of configuration. The reload loop
+// re-reads the config file into a Runtime, validates it, and atomically swaps
+// it in — boot fields are intentionally excluded because they cannot change in
+// a running process.
+type Runtime struct {
+	// Mode is detect or enforce.
+	Mode Mode
+	// FailClosed denies un-locatable clients when true.
+	FailClosed bool
+	// Countries is the resolved country blocklist.
+	Countries []string
+	// Regions is the resolved region blocklist.
+	Regions []string
+}
 
-	cfg.RefreshEvery, err = getEnvDuration("REFRESH_EVERY", defaultRefreshEvery)
+// Fingerprint is an order-independent signature of the runtime policy, used to
+// skip redundant swaps when a reload sees no change (so an unchanged ConfigMap
+// projection does not churn the live policy or spam events).
+func (r Runtime) Fingerprint() (sig string) {
+	sig = string(r.Mode) +
+		";fail_closed=" + strconv.FormatBool(r.FailClosed) +
+		";countries=" + canonical(r.Countries) +
+		";regions=" + canonical(r.Regions)
+
+	return sig
+}
+
+// ConfigFilePath returns the config file path from GEOIP_CONFIG_FILE, falling
+// back to DefaultConfigFile.
+func ConfigFilePath() (path string) {
+	path = getEnv("CONFIG_FILE", DefaultConfigFile)
+
+	return path
+}
+
+// LoadFile resolves the full configuration from the YAML file at path, applies
+// defaults, overlays the env-supplied secret credentials, and validates.
+func LoadFile(path string) (cfg Config, err error) {
+	var resolved Config
+
+	resolved, err = readConfig(path)
 	if err != nil {
 		return cfg, err
 	}
 
-	cfg.HTTPTimeout, err = getEnvDuration("HTTP_TIMEOUT", defaultHTTPTimeout)
-	if err != nil {
-		return cfg, err
-	}
-
-	cfg.BlocklistReloadEvery, err = getEnvDuration("BLOCKLIST_RELOAD_EVERY", defaultBlocklistReloadEvery)
-	if err != nil {
-		return cfg, err
-	}
+	cfg = resolved
+	cfg.AccountID = getEnv("ACCOUNT_ID", "")
+	cfg.LicenseKey = getEnv("LICENSE_KEY", "")
+	cfg.ConfigFile = path
 
 	err = cfg.validate()
 	if err != nil {
@@ -130,6 +255,81 @@ func Load() (cfg Config, err error) {
 	}
 
 	return cfg, err
+}
+
+// LoadRuntime re-reads only the hot-reloadable subset from the file at path and
+// validates it. Used by the reload loop; it never touches secrets or boot
+// fields.
+func LoadRuntime(path string) (rt Runtime, err error) {
+	var cfg Config
+
+	cfg, err = readConfig(path)
+	if err != nil {
+		return rt, err
+	}
+
+	rt = Runtime{
+		Mode:       cfg.Mode,
+		FailClosed: cfg.FailClosed,
+		Countries:  cfg.BlockedCountries,
+		Regions:    cfg.BlockedRegions,
+	}
+
+	err = rt.validate()
+	if err != nil {
+		return rt, err
+	}
+
+	return rt, err
+}
+
+// readConfig reads and parses the YAML file and applies defaults, without
+// touching secrets, the source path, or validation.
+func readConfig(path string) (cfg Config, err error) {
+	var raw []byte
+
+	raw, err = os.ReadFile(path) //nolint:gosec // path is operator-configured, not user input
+	if err != nil {
+		err = fmt.Errorf("reading config file %q: %w", path, err)
+
+		return cfg, err
+	}
+
+	var fc fileConfig
+
+	err = yaml.Unmarshal(raw, &fc)
+	if err != nil {
+		err = fmt.Errorf("parsing config file %q: %w", path, err)
+
+		return cfg, err
+	}
+
+	cfg = resolve(fc)
+
+	return cfg, err
+}
+
+// resolve turns the optional on-disk shape into a fully-defaulted Config.
+func resolve(fc fileConfig) (cfg Config) {
+	cfg = Config{
+		ListenAddr:       firstNonEmpty(fc.ListenAddr, defaultListenAddr),
+		DownloadURL:      firstNonEmpty(fc.DownloadURL, defaultDownloadURL),
+		RefreshEvery:     durationOr(fc.RefreshEvery, defaultRefreshEvery),
+		HTTPTimeout:      durationOr(fc.HTTPTimeout, defaultHTTPTimeout),
+		ClientIPHeader:   firstNonEmpty(fc.ClientIPHeader, defaultClientIPHeader),
+		DBPath:           fc.DBPath,
+		ReloadEvery:      durationOr(fc.ReloadEvery, defaultReloadEvery),
+		Mode:             Mode(strings.ToLower(strings.TrimSpace(string(fc.Mode)))),
+		FailClosed:       boolOr(fc.FailClosed, defaultFailClosed),
+		BlockedCountries: trimDrop(fc.Blocklist.Countries),
+		BlockedRegions:   trimDrop(fc.Blocklist.Regions),
+	}
+
+	if cfg.Mode == "" {
+		cfg.Mode = ModeDetect
+	}
+
+	return cfg
 }
 
 // validate checks the resolved configuration for internal consistency.
@@ -143,32 +343,23 @@ func (c Config) validate() (err error) {
 	return err
 }
 
-// getEnv reads GEOIP_<key>, falling back to def when unset or empty.
-func getEnv(key, def string) (val string) {
-	val = os.Getenv(envPrefix + key)
-	if val == "" {
-		val = def
+// validate checks the hot-reloadable subset. The mode check is what stops a
+// fat-fingered edit (e.g. "block") from being swapped in over a good policy.
+func (r Runtime) validate() (err error) {
+	if r.Mode != ModeDetect && r.Mode != ModeEnforce {
+		err = fmt.Errorf("%w: got %q", ErrInvalidMode, r.Mode)
+
+		return err
 	}
 
-	return val
+	return err
 }
 
-// getEnvList reads GEOIP_<key> as a list separated by commas and/or newlines,
-// so both inline (`IR,KP,RU`) and YAML block-scalar (`|`) forms work:
-//
-//	GEOIP_BLOCKED_COUNTRIES: |
-//	  IR
-//	  KP
-//	  RU
-//
-// Entries are trimmed; empties are dropped. Returns an empty slice when unset.
-func getEnvList(key string) (out []string) {
-	raw := os.Getenv(envPrefix + key)
+// splitList splits a comma/newline/CR-separated string, trimming entries and
+// dropping empties. This is the forgiving list format shared by the YAML block
+// scalars so a `|` block reads one-entry-per-line.
+func splitList(raw string) (out []string) {
 	out = []string{}
-
-	if raw == "" {
-		return out
-	}
 
 	fields := strings.FieldsFunc(raw, func(r rune) (sep bool) {
 		sep = r == ',' || r == '\n' || r == '\r'
@@ -186,44 +377,75 @@ func getEnvList(key string) (out []string) {
 	return out
 }
 
-// getEnvBool reads GEOIP_<key> as a bool, falling back to def when unset or
-// unparseable.
-func getEnvBool(key string, def bool) (val bool) {
-	val = def
-
-	raw := os.Getenv(envPrefix + key)
-	if raw == "" {
-		return val
+// trimDrop trims each entry and drops empties, preserving order.
+func trimDrop(items []string) (out []string) {
+	out = []string{}
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
 	}
 
-	parsed, err := strconv.ParseBool(raw)
-	if err != nil {
-		return val
-	}
-
-	val = parsed
-
-	return val
+	return out
 }
 
-// getEnvDuration reads GEOIP_<key> as a Go duration, falling back to def.
-func getEnvDuration(key string, def time.Duration) (d time.Duration, err error) {
-	raw := os.Getenv(envPrefix + key)
-	if raw == "" {
-		d = def
-
-		return d, err
+// canonical normalises a list to a sorted, upper-cased, comma-joined string for
+// fingerprinting.
+func canonical(items []string) (out string) {
+	norm := make([]string, 0, len(items))
+	for _, item := range items {
+		trimmed := strings.ToUpper(strings.TrimSpace(item))
+		if trimmed != "" {
+			norm = append(norm, trimmed)
+		}
 	}
 
-	d, err = time.ParseDuration(raw)
-	if err != nil {
-		err = fmt.Errorf("parsing %s%s: %w", envPrefix, key, err)
-		d = def
+	sort.Strings(norm)
 
-		return d, err
+	out = strings.Join(norm, ",")
+
+	return out
+}
+
+// firstNonEmpty returns val when non-empty, else def.
+func firstNonEmpty(val, def string) (out string) {
+	out = val
+	if strings.TrimSpace(out) == "" {
+		out = def
 	}
 
-	return d, err
+	return out
+}
+
+// durationOr returns *d when set, else def.
+func durationOr(d *Duration, def time.Duration) (out time.Duration) {
+	out = def
+	if d != nil {
+		out = time.Duration(*d)
+	}
+
+	return out
+}
+
+// boolOr returns *b when set, else def.
+func boolOr(b *bool, def bool) (out bool) {
+	out = def
+	if b != nil {
+		out = *b
+	}
+
+	return out
+}
+
+// getEnv reads GEOIP_<key>, falling back to def when unset or empty.
+func getEnv(key, def string) (val string) {
+	val = os.Getenv(envPrefix + key)
+	if val == "" {
+		val = def
+	}
+
+	return val
 }
 
 // ParseAccountID converts the MaxMind account ID string to an int, tolerating

@@ -50,7 +50,7 @@ type Handler struct {
 	blocklist      *geoip.Blocklist
 	resolver       geoip.Resolver
 	ready          func() (ready bool)
-	mode           config.Mode
+	modeFn         func() (mode config.Mode)
 	clientIPHeader string
 	metrics        *metrics.Metrics
 	log            *slog.Logger
@@ -58,7 +58,9 @@ type Handler struct {
 
 // NewHandler builds a Handler. ready reports whether the geo database is loaded
 // (used by the readiness probe); metrics may be nil (instrumentation no-ops).
-func NewHandler(blocklist *geoip.Blocklist, resolver geoip.Resolver, ready func() (ready bool), mode config.Mode, clientIPHeader string, m *metrics.Metrics, log *slog.Logger) (h *Handler) {
+// modeFn is read on every check rather than captured, so a hot-reload that flips
+// mode takes effect without rebuilding the handler.
+func NewHandler(blocklist *geoip.Blocklist, resolver geoip.Resolver, ready func() (ready bool), modeFn func() (mode config.Mode), clientIPHeader string, m *metrics.Metrics, log *slog.Logger) (h *Handler) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -67,7 +69,7 @@ func NewHandler(blocklist *geoip.Blocklist, resolver geoip.Resolver, ready func(
 		blocklist:      blocklist,
 		resolver:       resolver,
 		ready:          ready,
-		mode:           mode,
+		modeFn:         modeFn,
 		clientIPHeader: clientIPHeader,
 		metrics:        m,
 		log:            log,
@@ -121,7 +123,8 @@ func (h *Handler) handleCheck(w http.ResponseWriter, r *http.Request) {
 	clientIP := clientIPFromHeader(r.Header.Get(h.clientIPHeader))
 	verdict := h.blocklist.Evaluate(h.resolver, clientIP)
 
-	deny := verdict.Blocked && h.mode == config.ModeEnforce
+	mode := h.modeFn()
+	deny := verdict.Blocked && mode == config.ModeEnforce
 
 	verdictStr := "allow"
 	if verdict.Blocked {
@@ -152,7 +155,7 @@ func (h *Handler) handleCheck(w http.ResponseWriter, r *http.Request) {
 		"region", verdict.RegionISO,
 		"reason", verdict.Reason,
 		"blocked", verdict.Blocked,
-		"mode", string(h.mode),
+		"mode", string(mode),
 		"denied", deny,
 		"trace_id", traceID,
 	)

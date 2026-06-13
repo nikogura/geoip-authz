@@ -17,18 +17,16 @@ downloadURL: ""
 clientIPHeader: ""
 refreshEvery: ""
 
-# Blocklist policy.
+# Blocklist policy. Rendered into the single config.yaml; edited in the live
+# ConfigMap, it hot-reloads with no pod restart.
 blockedCountries: []
 # - RU
 # - IR
 blockedRegions: []
 # - UA-43
 
-# Hot-reload the blocklist from a mounted ConfigMap (files) instead of env vars,
-# so a policy edit takes effect WITHOUT a pod restart (env vars can't change in a
-# running container). Strongly recommended; set false to fall back to env mode.
-hotReload: true
-# How often the mounted blocklist is re-read for changes. Empty = default (30s).
+# How often the mounted config.yaml is re-read for changes (mode, failClosed,
+# blocklist). Empty = service default (30s).
 reloadEvery: ""
 
 # MaxMind credentials (optional — omit for a local DB path or unauthenticated

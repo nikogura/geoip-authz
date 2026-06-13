@@ -53,68 +53,70 @@ Every check sets `X-Geoip-Verdict` (`allow`/`block`), `X-Geoip-Country`,
 - **Logs** — structured JSON (`slog`), one line per check, including the
   `trace_id` for correlation when tracing is enabled.
 
-## Configuration (environment, `GEOIP_` prefix)
+## Configuration (single YAML file, file-authoritative)
 
-| Variable                  | Default                              | Notes                                            |
-|---------------------------|--------------------------------------|--------------------------------------------------|
-| `GEOIP_MODE`              | `detect`                             | `detect` (log only) or `enforce` (403)           |
-| `GEOIP_BLOCKED_COUNTRIES` | (empty)                              | comma/newline ISO-3166-1 alpha-2, e.g. `RU,IR` (startup-only) |
-| `GEOIP_BLOCKED_REGIONS`   | (empty)                              | comma/newline ISO-3166-2, e.g. `UA-43,UA-14` (startup-only)   |
-| `GEOIP_BLOCKLIST_DIR`      | (empty)                              | dir holding `countries`/`regions` files; **hot-reloaded** (takes precedence over the env lists) |
-| `GEOIP_BLOCKLIST_RELOAD_EVERY` | `30s`                           | how often `GEOIP_BLOCKLIST_DIR` is re-read for changes |
-| `GEOIP_FAIL_CLOSED`       | `true`                               | deny when the client can't be located            |
-| `GEOIP_LISTEN_ADDR`       | `:8080`                              | ext_authz + health server                        |
-| `GEOIP_DOWNLOAD_URL`      | MaxMind GeoLite2-City tar.gz         | point at a caching mirror (see below)            |
-| `GEOIP_ACCOUNT_ID`        | —                                    | MaxMind account ID (HTTP basic-auth)             |
-| `GEOIP_LICENSE_KEY`       | —                                    | MaxMind license key (HTTP basic-auth)            |
-| `GEOIP_REFRESH_EVERY`     | `24h`                                | jittered; retains last-good on failure           |
-| `GEOIP_CLIENT_IP_HEADER`  | `X-Forwarded-For`                    | left-most entry is used                          |
-| `GEOIP_DB_PATH`           | —                                    | load a local `.mmdb` instead of downloading      |
-
-The list variables (`GEOIP_BLOCKED_COUNTRIES`, `GEOIP_BLOCKED_REGIONS`) accept
-**commas and/or newlines**, so a YAML block scalar stays readable:
+All configuration lives in **one YAML file** (default `/etc/geoip-authz/config.yaml`;
+override the path with `GEOIP_CONFIG_FILE`). Mount a ConfigMap there. The file is
+the single source of truth — there are no per-setting environment variables.
 
 ```yaml
-GEOIP_BLOCKED_COUNTRIES: |
-  IR
-  KP
-  RU
-```
-
-MaxMind credentials are **optional** — omit them when using `GEOIP_DB_PATH`, an
-unauthenticated mirror, or a proxy that injects its own auth.
-
-### Hot-reloading the blocklist (no restart)
-
-Environment variables are frozen when a container starts, so `GEOIP_BLOCKED_*`
-changes only apply on a pod restart. To change the policy **without** a restart,
-set `GEOIP_BLOCKLIST_DIR` to a directory containing two files — `countries` and
-`regions` (same comma/newline format) — and mount a ConfigMap there:
-
-```yaml
-# ConfigMap mounted at /etc/geoip-authz/blocklist
-data:
-  countries: |
-    RU
+# /etc/geoip-authz/config.yaml
+mode: enforce                       # detect (log only) or enforce (403)   [hot-reload]
+failClosed: true                    # deny when the client can't be located [hot-reload]
+blocklist:                          #                                       [hot-reload]
+  countries: |                      # ISO-3166-1 alpha-2 — | block, one per line
     IR
-  regions: |
+    KP
+    RU
+  regions: |                        # ISO-3166-2 — needs the City database
+    UA-09
+    UA-14
     UA-43
+listenAddr: ":8080"                 # ext_authz + health server             [boot]
+clientIPHeader: "X-Forwarded-For"   # left-most entry is used               [boot]
+geoDownloadURL: "https://..."       # MaxMind GeoLite2-City tar.gz / mirror [boot]
+refreshEvery: 24h                   # DB re-pull; jittered, last-good kept   [boot]
+reloadEvery: 30s                    # how often this file is re-read         [boot]
+# dbPath: /data/city.mmdb           # load a local .mmdb instead of downloading [boot]
 ```
 
-The kubelet updates a mounted ConfigMap in place; the service re-reads the files
-every `GEOIP_BLOCKLIST_RELOAD_EVERY` (default 30s) and **atomically swaps** the
-policy when the content changes — in-flight checks finish against the old policy,
-subsequent ones see the new one. An unchanged read is a no-op; a read error
-retains the last-good policy. Reloads and the live blocklist size are exposed as
+`countries`/`regions` accept a **`|` block scalar (one entry per line), a
+comma-separated string, or a YAML sequence** — all equivalent; entries are
+trimmed and empties dropped. `failClosed` defaults to **true** when omitted (safe
+default for a sanctions gate). `mode` defaults to `detect`; any value other than
+`detect`/`enforce` is rejected.
+
+### Secrets are the one exception (environment, not the file)
+
+MaxMind credentials are **never** put in the config file — they come from the
+environment so they can be injected from a Secret:
+
+| Variable            | Notes                                                      |
+|---------------------|------------------------------------------------------------|
+| `GEOIP_CONFIG_FILE` | config file path (default `/etc/geoip-authz/config.yaml`)  |
+| `GEOIP_ACCOUNT_ID`  | MaxMind account ID (HTTP basic-auth) — optional            |
+| `GEOIP_LICENSE_KEY` | MaxMind license key (HTTP basic-auth) — optional           |
+
+Credentials are **optional** — omit them when using `dbPath`, an unauthenticated
+mirror, or a proxy that injects its own auth.
+
+### Hot-reloading (no restart)
+
+The kubelet updates a mounted ConfigMap in place; the service re-reads the file
+every `reloadEvery` (default 30s) and **atomically swaps** the hot-reloadable
+subset — **`mode`, `failClosed`, and the blocklist** — when the content changes.
+In-flight checks finish against the old policy; subsequent ones see the new one.
+An unchanged read is a no-op. A read **or validation** error (e.g. a fat-fingered
+`mode: block`) is logged and the **last-good policy is retained** — a typo never
+takes the gate down. Boot-only fields (listen address, download URL, intervals)
+change only on a pod restart. Reloads and the live blocklist size are exposed as
 metrics (`geoip_authz_blocklist_reload_total`, `geoip_authz_blocklist_size`) and
-logged as a `blocklist hot-reloaded` event. The bundled `kubernetes/` example and
-Helm chart wire this up by default (`hotReload: true`).
+logged as a `config hot-reloaded` event.
 
 ## Running
 
 ```
-GEOIP_MODE=enforce \
-GEOIP_BLOCKED_COUNTRIES=RU,IR,KP \
+GEOIP_CONFIG_FILE=./config.yaml \
 GEOIP_ACCOUNT_ID=xxxx GEOIP_LICENSE_KEY=yyyy \
 geoip-authz server
 ```

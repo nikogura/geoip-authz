@@ -3,13 +3,25 @@ kind: ConfigMap
 metadata:
   name: geoip-authz
 data:
-  # detect = log the would-block verdict without 403ing; flip to enforce to block.
-  GEOIP_MODE: "detect"
-  GEOIP_FAIL_CLOSED: "true"
-  # Default downloads GeoLite2-City directly from MaxMind. Point at a caching
-  # mirror (e.g. geoip-cache-proxy) to spare MaxMind's rate limits in a fleet.
-  # GEOIP_DOWNLOAD_URL: "https://geoip.example.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz"
-  #
-  # The blocklist is mounted as files from blocklist-configmap.yaml and
-  # HOT-RELOADED by the service, so editing it takes effect without a pod restart.
-  GEOIP_BLOCKLIST_DIR: "/etc/geoip-authz/blocklist"
+  # Single source of truth, mounted as a file at /etc/geoip-authz/config.yaml.
+  # The kubelet updates a mounted ConfigMap in place and geoip-authz re-reads it
+  # on a timer, so editing mode / failClosed / the blocklist takes effect WITHOUT
+  # a pod restart. MaxMind credentials are NOT here — they come from the Secret.
+  config.yaml: |
+    # detect = log the would-block verdict without 403ing; enforce = 403.
+    mode: detect
+    failClosed: true
+    blocklist:
+      # ISO-3166-1 alpha-2 countries / ISO-3166-2 regions — one entry per line.
+      countries: |
+        RU
+        IR
+        KP
+      regions: |
+        UA-09
+        UA-14
+        UA-43
+    # Point at a caching mirror (e.g. geoip-cache-proxy) to spare MaxMind's
+    # rate limits in a fleet:
+    # geoDownloadURL: "https://geoip.example.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz"
+    reloadEvery: 30s

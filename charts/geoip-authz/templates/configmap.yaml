@@ -1,3 +1,18 @@
+{{- /*
+Render the single source-of-truth config.yaml from values. The hot-reloadable
+subset (mode, failClosed, blocklist) and the boot settings all live here; the
+service reads it from /etc/geoip-authz/config.yaml and re-reads it on a timer.
+MaxMind credentials are NOT here — they come from the Secret.
+*/}}
+{{- $cfg := dict "mode" .Values.mode "failClosed" .Values.failClosed }}
+{{- $bl := dict }}
+{{- if .Values.blockedCountries }}{{- $_ := set $bl "countries" .Values.blockedCountries }}{{- end }}
+{{- if .Values.blockedRegions }}{{- $_ := set $bl "regions" .Values.blockedRegions }}{{- end }}
+{{- $_ := set $cfg "blocklist" $bl }}
+{{- with .Values.downloadURL }}{{- $_ := set $cfg "geoDownloadURL" . }}{{- end }}
+{{- with .Values.clientIPHeader }}{{- $_ := set $cfg "clientIPHeader" . }}{{- end }}
+{{- with .Values.refreshEvery }}{{- $_ := set $cfg "refreshEvery" . }}{{- end }}
+{{- with .Values.reloadEvery }}{{- $_ := set $cfg "reloadEvery" . }}{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -5,33 +20,5 @@ metadata:
   labels:
     {{- include "geoip-authz.labels" . | nindent 4 }}
 data:
-  GEOIP_MODE: {{ .Values.mode | quote }}
-  GEOIP_FAIL_CLOSED: {{ .Values.failClosed | quote }}
-  {{- with .Values.downloadURL }}
-  GEOIP_DOWNLOAD_URL: {{ . | quote }}
-  {{- end }}
-  {{- with .Values.clientIPHeader }}
-  GEOIP_CLIENT_IP_HEADER: {{ . | quote }}
-  {{- end }}
-  {{- with .Values.refreshEvery }}
-  GEOIP_REFRESH_EVERY: {{ . | quote }}
-  {{- end }}
-  {{- if .Values.hotReload }}
-  GEOIP_BLOCKLIST_DIR: /etc/geoip-authz/blocklist
-  {{- with .Values.reloadEvery }}
-  GEOIP_BLOCKLIST_RELOAD_EVERY: {{ . | quote }}
-  {{- end }}
-  {{- else }}
-  {{- if .Values.blockedCountries }}
-  GEOIP_BLOCKED_COUNTRIES: |
-    {{- range .Values.blockedCountries }}
-    {{ . }}
-    {{- end }}
-  {{- end }}
-  {{- if .Values.blockedRegions }}
-  GEOIP_BLOCKED_REGIONS: |
-    {{- range .Values.blockedRegions }}
-    {{ . }}
-    {{- end }}
-  {{- end }}
-  {{- end }}
+  config.yaml: |
+    {{- toYaml $cfg | nindent 4 }}

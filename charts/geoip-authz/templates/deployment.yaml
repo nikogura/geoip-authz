@@ -25,13 +25,13 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          {{- if include "geoip-authz.useSecret" . }}
           envFrom:
-            - configMapRef:
-                name: {{ include "geoip-authz.fullname" . }}
-            {{- if include "geoip-authz.useSecret" . }}
+            # MaxMind basic-auth creds only — all other config is the mounted
+            # config.yaml, not env.
             - secretRef:
                 name: {{ include "geoip-authz.secretName" . }}
-            {{- end }}
+          {{- end }}
           {{- with .Values.otlpEndpoint }}
           env:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -53,17 +53,16 @@ spec:
             capabilities:
               drop:
                 - ALL
-          {{- if .Values.hotReload }}
           volumeMounts:
-            - name: blocklist
-              mountPath: /etc/geoip-authz/blocklist
+            # Whole-ConfigMap directory mount (NOT subPath) so the kubelet
+            # updates config.yaml in place and the service hot-reloads it.
+            - name: config
+              mountPath: /etc/geoip-authz
               readOnly: true
-          {{- end }}
-      {{- if .Values.hotReload }}
       volumes:
-        # Mounted ConfigMap; the kubelet updates it in place and geoip-authz
-        # hot-reloads, so a policy edit needs no pod restart.
-        - name: blocklist
+        # Single config file as a mounted ConfigMap; the kubelet updates it in
+        # place and geoip-authz hot-reloads mode/failClosed/blocklist, so a
+        # policy edit needs no pod restart.
+        - name: config
           configMap:
-            name: {{ include "geoip-authz.fullname" . }}-blocklist
-      {{- end }}
+            name: {{ include "geoip-authz.fullname" . }}

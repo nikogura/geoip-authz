@@ -63,9 +63,11 @@ func runServer(parent context.Context) (err error) {
 
 	var cfg config.Config
 
-	cfg, err = config.Load()
+	configPath := config.ConfigFilePath()
+
+	cfg, err = config.LoadFile(configPath)
 	if err != nil {
-		err = fmt.Errorf("loading config: %w", err)
+		err = fmt.Errorf("loading config from %s: %w", configPath, err)
 
 		return err
 	}

@@ -8,7 +8,6 @@ namespace: geoip-authz
 resources:
   - namespace.yaml
   - configmap.yaml
-  - blocklist-configmap.yaml
   - secret.yaml
   - deployment.yaml
   - service.yaml

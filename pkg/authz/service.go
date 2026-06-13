@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/nikogura/geoip-authz/pkg/config"
@@ -44,10 +45,16 @@ type Service struct {
 	metrics   *metrics.Metrics
 	log       *slog.Logger
 
-	// blocklistFingerprint is the signature of the file-sourced policy currently
-	// applied, used to skip redundant swaps when a reload sees no change. Only
-	// touched by the single reload goroutine (and once at startup before it runs).
-	blocklistFingerprint string
+	// mode is the hot-reloadable enforce/detect setting, read on every check via
+	// the getter passed to the Handler so a reload takes effect without a
+	// restart. Held behind an atomic pointer for lock-free reads.
+	mode atomic.Pointer[config.Mode]
+
+	// runtimeFingerprint is the signature of the hot-reloadable policy (mode,
+	// fail-closed, blocklist) currently applied, used to skip redundant swaps
+	// when a reload sees no change. Only touched by the single reload goroutine
+	// (and once at startup before it runs).
+	runtimeFingerprint string
 }
 
 // NewService builds a Service from resolved configuration.
@@ -65,7 +72,26 @@ func NewService(cfg config.Config, log *slog.Logger) (svc *Service) {
 		log:       log,
 	}
 
+	// Seed the atomic mode and the runtime fingerprint from the boot config so
+	// the first reload tick is a no-op when the file is unchanged.
+	mode := cfg.Mode
+	svc.mode.Store(&mode)
+	svc.runtimeFingerprint = config.Runtime{
+		Mode:       cfg.Mode,
+		FailClosed: cfg.FailClosed,
+		Countries:  cfg.BlockedCountries,
+		Regions:    cfg.BlockedRegions,
+	}.Fingerprint()
+
 	return svc
+}
+
+// currentMode returns the live mode, read lock-free. Passed to the Handler so a
+// hot-reload that flips mode takes effect on the next request.
+func (s *Service) currentMode() (mode config.Mode) {
+	mode = *s.mode.Load()
+
+	return mode
 }
 
 // Run primes the database, starts the refresh loop, and serves until the
@@ -77,7 +103,8 @@ func (s *Service) Run(ctx context.Context) (err error) {
 		"refresh_every", s.cfg.RefreshEvery.String(),
 		"blocked_countries", len(s.cfg.BlockedCountries),
 		"blocked_regions", len(s.cfg.BlockedRegions),
-		"blocklist_dir", s.cfg.BlocklistDir,
+		"config_file", s.cfg.ConfigFile,
+		"reload_every", s.cfg.ReloadEvery.String(),
 		"fail_closed", s.cfg.FailClosed,
 	)
 
@@ -100,13 +127,13 @@ func (s *Service) Run(ctx context.Context) (err error) {
 		return err
 	}
 
-	s.primeBlocklist(ctx)
+	s.primeRuntime(ctx)
 
 	s.primeDatabase(ctx)
 
 	go s.refreshLoop(ctx)
 
-	handler := NewHandler(s.blocklist, s.store, s.store.Ready, s.cfg.Mode, s.cfg.ClientIPHeader, s.metrics, s.log)
+	handler := NewHandler(s.blocklist, s.store, s.store.Ready, s.currentMode, s.cfg.ClientIPHeader, s.metrics, s.log)
 
 	mux := handler.Routes()
 	mux.Handle("/metrics", metricsHandler)
@@ -132,60 +159,52 @@ func (s *Service) primeDatabase(ctx context.Context) {
 	s.log.InfoContext(ctx, "geoip database loaded")
 }
 
-// primeBlocklist performs the initial file-based blocklist load and starts the
-// hot-reload loop — but only when a blocklist directory is configured. Without
-// it, the env-supplied policy built in NewBlocklist stands and never changes
-// (env vars can't change in a running container, so there is nothing to reload).
-func (s *Service) primeBlocklist(ctx context.Context) {
-	if s.cfg.BlocklistDir == "" {
+// primeRuntime starts the hot-reload loop that re-reads the config file for the
+// hot-reloadable subset (mode, fail-closed, blocklist) — but only when a config
+// file path is configured. The boot config already seeded the live policy in
+// NewService, so there is no initial reload here; the loop simply watches for
+// subsequent edits.
+func (s *Service) primeRuntime(ctx context.Context) {
+	if s.cfg.ConfigFile == "" {
 		return
 	}
 
-	changed, err := s.reloadBlocklist()
-	s.metrics.ObserveReload(ctx, err == nil)
-
-	switch {
-	case err != nil:
-		s.log.ErrorContext(ctx, "initial blocklist load from dir failed; retaining env/empty policy",
-			"dir", s.cfg.BlocklistDir, "error", err.Error())
-	case changed:
-		countries, regions := s.blocklist.Sizes()
-		s.log.InfoContext(ctx, "blocklist loaded from files",
-			"dir", s.cfg.BlocklistDir, "countries", countries, "regions", regions)
-	}
-
-	go s.blocklistReloadLoop(ctx)
+	go s.runtimeReloadLoop(ctx)
 }
 
-// reloadBlocklist reads the blocklist files and, when their contents differ from
-// what is currently applied, atomically swaps in the new policy. It returns
-// whether the policy actually changed (so unchanged ConfigMap projections don't
-// churn the live blocklist or spam events).
-func (s *Service) reloadBlocklist() (changed bool, err error) {
-	var countries, regions []string
+// reloadRuntime re-reads the hot-reloadable subset from the config file and,
+// when it differs from what is currently applied, atomically swaps in the new
+// mode, fail-closed setting, and blocklist. It returns whether the policy
+// actually changed (so an unchanged ConfigMap projection doesn't churn the live
+// policy or spam events). An invalid file (e.g. a bad mode) returns an error and
+// leaves the last-good policy untouched — the gate never goes down on a typo.
+func (s *Service) reloadRuntime() (changed bool, err error) {
+	var rt config.Runtime
 
-	countries, regions, err = geoip.LoadBlocklistFiles(s.cfg.BlocklistDir)
+	rt, err = config.LoadRuntime(s.cfg.ConfigFile)
 	if err != nil {
 		return changed, err
 	}
 
-	fingerprint := geoip.Fingerprint(countries, regions)
-	if fingerprint == s.blocklistFingerprint {
+	fingerprint := rt.Fingerprint()
+	if fingerprint == s.runtimeFingerprint {
 		return changed, err
 	}
 
-	s.blocklist.Replace(countries, regions)
-	s.blocklistFingerprint = fingerprint
+	mode := rt.Mode
+	s.mode.Store(&mode)
+	s.blocklist.Replace(rt.Countries, rt.Regions, rt.FailClosed)
+	s.runtimeFingerprint = fingerprint
 	changed = true
 
 	return changed, err
 }
 
-// blocklistReloadLoop periodically re-reads the blocklist directory so a
-// ConfigMap edit takes effect without a pod restart. A read error is logged and
-// the last-good policy retained (self-healing).
-func (s *Service) blocklistReloadLoop(ctx context.Context) {
-	ticker := time.NewTicker(s.cfg.BlocklistReloadEvery)
+// runtimeReloadLoop periodically re-reads the config file so an edit to mode,
+// fail-closed, or the blocklist takes effect without a pod restart. A read or
+// validation error is logged and the last-good policy retained (self-healing).
+func (s *Service) runtimeReloadLoop(ctx context.Context) {
+	ticker := time.NewTicker(s.cfg.ReloadEvery)
 	defer ticker.Stop()
 
 	for {
@@ -193,18 +212,19 @@ func (s *Service) blocklistReloadLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			changed, err := s.reloadBlocklist()
+			changed, err := s.reloadRuntime()
 			s.metrics.ObserveReload(ctx, err == nil)
 
 			if err != nil {
-				s.log.ErrorContext(ctx, "blocklist reload failed; retaining last-good", "error", err.Error())
+				s.log.ErrorContext(ctx, "config reload failed; retaining last-good", "error", err.Error())
 
 				continue
 			}
 
 			if changed {
 				countries, regions := s.blocklist.Sizes()
-				s.log.InfoContext(ctx, "blocklist hot-reloaded", "countries", countries, "regions", regions)
+				s.log.InfoContext(ctx, "config hot-reloaded",
+					"mode", string(s.currentMode()), "countries", countries, "regions", regions)
 			}
 		}
 	}
